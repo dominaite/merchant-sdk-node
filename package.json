@@ -1,9 +1,9 @@
 {
   "name": "@dominaite/merchant-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Server-side Node.js client for the Dominaite merchant API: create hosted checkout sessions from your own backend.",
-  "license": "UNLICENSED",
-    "type": "module",
+  "license": "MIT",
+  "type": "module",
   "engines": {
     "node": ">=20.0.0"
   },
