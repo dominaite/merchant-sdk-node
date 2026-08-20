@@ -14,6 +14,7 @@ export type {
   CheckoutStatus,
   CreateCheckoutSessionParams,
   DominaiteClientOptions,
+  Ping,
   RetryOptions,
   TransactionStatus,
 } from './types.js'

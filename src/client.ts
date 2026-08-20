@@ -7,13 +7,15 @@ import type {
   CheckoutStatus,
   CreateCheckoutSessionParams,
   DominaiteClientOptions,
+  Ping,
   RetryOptions,
 } from './types.js'
 
 const DEFAULT_BASE_URL = 'https://api.dominaite.com/payments'
 const SESSIONS_PATH = '/merchant-api/bridgerpay/checkout/sessions'
+const PING_PATH = '/merchant-api/ping'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
-const SDK_VERSION = '0.1.0'
+const SDK_VERSION = '0.1.2'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /**
@@ -39,6 +41,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  */
 export class DominaiteClient {
   static readonly SESSIONS_PATH = SESSIONS_PATH
+  static readonly PING_PATH = PING_PATH
 
   readonly #keyId: string
   readonly #secret: string
@@ -67,6 +70,21 @@ export class DominaiteClient {
   }
 
   /**
+   * Checks your credentials, your signing and your clock without creating anything.
+   *
+   * Make this your first live call: it separates the setup problems from the payment
+   * ones. Throws AuthenticationError (key id, secret, signature, clock or IP
+   * allowlist), ApiError (unexpected response), or TransportError (network or 5xx).
+   *
+   * Watch clockSkewSeconds - the gateway rejects requests once it passes 300.
+   */
+  async ping(): Promise<Ping> {
+    // GET signs an EMPTY idempotency key and an EMPTY body.
+    const response = await this.#request('GET', PING_PATH, null, '')
+    return response as Ping
+  }
+
+  /**
    * Creates a hosted checkout session for one payment.
    *
    * Throws AuthenticationError (wrong credentials, bad signature, clock off, IP not
@@ -79,11 +97,16 @@ export class DominaiteClient {
     const response = await this.#request('POST', SESSIONS_PATH, body, idempotencyKey)
 
     if (response['success'] !== true || typeof response['checkout'] !== 'object' || response['checkout'] === null) {
+      // A replay refusal names the transaction your key collided with. Carry it (and
+      // the whole payload) so the caller can reconcile with getStatus() instead of
+      // minting a second payment for the same order.
       throw new CheckoutRefusedError(
         typeof response['errorCode'] === 'string' ? response['errorCode'] : 'UNKNOWN',
         typeof response['errorMessage'] === 'string'
           ? response['errorMessage']
           : 'The checkout session was refused.',
+        typeof response['transactionId'] === 'string' ? response['transactionId'] : undefined,
+        response,
       )
     }
 
@@ -136,9 +159,18 @@ export class DominaiteClient {
    * Reads the payment status of one of your checkout sessions.
    *
    * Status values: pending, processing, succeeded, failed, refunded, partially_refunded,
-   * cancelled, disputed, abandoned. While a session is still payable the response carries
-   * expiresAt; amounts are integers in MINOR units. An unknown transaction id throws an
-   * ApiError with httpStatus 404.
+   * cancelled, disputed, requires_capture, abandoned. While a session is still payable the
+   * response carries expiresAt; amounts are integers in MINOR units. An unknown transaction
+   * id throws an ApiError with httpStatus 404.
+   *
+   * succeeded is the only value that means the payment is complete. Keep polling on
+   * pending, processing and requires_capture - none of them is terminal.
+   *
+   * requires_capture is NOT "unpaid": the payer has already paid and the funds are held
+   * awaiting capture. Never treat it as an abandoned order.
+   *
+   * Treat any status you do not recognise as still-open too: a value the API adds later
+   * should make you keep polling, never silently close an order that is still live.
    *
    * Poll after the payer returns to you, or on your order timeout - not in a tight loop;
    * the endpoint is rate limited per key.
