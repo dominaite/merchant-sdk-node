@@ -1,0 +1,35 @@
+{
+  "name": "@dominaite/merchant-sdk",
+  "version": "0.1.0",
+  "description": "Server-side Node.js client for the Dominaite merchant API: create hosted checkout sessions from your own backend.",
+  "license": "UNLICENSED",
+    "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run clean && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && tsc -p tsconfig.types.json && node scripts/write-dist-package-json.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "test": "npm run build && node --test test/",
+    "prepare": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.6.0"
+  }
+}
