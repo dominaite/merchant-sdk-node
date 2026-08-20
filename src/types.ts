@@ -55,6 +55,7 @@ export type TransactionStatus =
   | 'partially_refunded'
   | 'cancelled'
   | 'disputed'
+  | 'requires_capture'
   | 'abandoned'
 
 /** What {@link DominaiteClient.getStatus} returns. */
@@ -71,6 +72,21 @@ export interface CheckoutStatus {
   updatedAt?: string
   /** Present while the session is still payable. */
   expiresAt?: string
+  [key: string]: unknown
+}
+
+/** What {@link DominaiteClient.ping} returns: proof your key, signing and clock are good. */
+export interface Ping {
+  /** Always true on a 200. */
+  pong: boolean
+  /** The merchant id your key authenticated as. */
+  merchantId: string
+  /** ISO 8601 server time. */
+  serverTime?: string
+  /** Server time in unix seconds. */
+  serverUnixTime?: number
+  /** Server time minus your X-Timestamp. Requests start failing at 300. */
+  clockSkewSeconds: number
   [key: string]: unknown
 }
 

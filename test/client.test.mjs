@@ -132,6 +132,51 @@ test('getStatus signs an empty idempotency key and an empty body', async () => {
   assert.equal(init.headers['X-Signature'], expected)
 })
 
+test('ping signs an empty idempotency key and an empty body against the canonical path', async () => {
+  const pong = {
+    pong: true,
+    merchantId: 'mer_1',
+    serverTime: '2026-08-20T12:00:00Z',
+    serverUnixTime: 1755691200,
+    clockSkewSeconds: 2,
+  }
+  // The gateway envelope: the ping read is FLAT inside data, with no inner success.
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, data: pong } })
+
+  const result = await makeClient(fetchImpl).ping()
+  assert.deepEqual(result, pong)
+
+  const { url, init } = calls[0]
+  assert.equal(url, `${BASE_URL}${DominaiteClient.PING_PATH}`)
+  assert.equal(init.method, 'GET')
+  assert.equal(init.body, undefined)
+  assert.equal(init.headers['Idempotency-Key'], undefined)
+
+  // The signed path is the canonical path, never the base URL's own prefix.
+  const expected = signRequest({
+    secret: VECTOR.secret,
+    timestamp: init.headers['X-Timestamp'],
+    method: 'GET',
+    path: '/merchant-api/ping',
+    idempotencyKey: '',
+    body: '',
+  })
+  assert.equal(init.headers['X-Signature'], expected)
+})
+
+test('a ping against bad credentials is an AuthenticationError carrying the code', async () => {
+  const { fetchImpl } = recordingFetch({ status: 401, body: { errorCode: 'INVALID_SIGNATURE' } })
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).ping(),
+    (error) => {
+      assert.ok(error instanceof AuthenticationError)
+      assert.equal(error.errorCode, 'INVALID_SIGNATURE')
+      return true
+    },
+  )
+})
+
 test('getStatus rejects anything that is not the returned transaction UUID', async () => {
   const { fetchImpl, calls } = recordingFetch({ body: {} })
   await assert.rejects(() => makeClient(fetchImpl).getStatus('order-1042'), TypeError)
@@ -150,6 +195,47 @@ test('a refusal is a CheckoutRefusedError carrying the error code, not a transpo
       assert.ok(error instanceof CheckoutRefusedError)
       assert.ok(!(error instanceof TransportError))
       assert.equal(error.errorCode, 'PAYMENT_PROCESSING_UNAVAILABLE')
+      return true
+    },
+  )
+})
+
+test('a replay refusal carries the transaction id so the caller can reconcile', async () => {
+  // Without this the documented recovery - read it back with getStatus() - is
+  // unreachable from the error, leaving a second payment as the only option.
+  const { fetchImpl } = recordingFetch({
+    status: 200,
+    body: {
+      success: false,
+      transactionId: CHECKOUT.transactionId,
+      errorCode: 'DUPLICATE_REQUEST',
+      errorMessage: 'A checkout session for this idempotency key is already open.',
+    },
+  })
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    (error) => {
+      assert.ok(error instanceof CheckoutRefusedError)
+      assert.equal(error.errorCode, 'DUPLICATE_REQUEST')
+      assert.equal(error.transactionId, CHECKOUT.transactionId)
+      assert.equal(error.result.errorCode, 'DUPLICATE_REQUEST')
+      return true
+    },
+  )
+})
+
+test('a refusal with no transaction id leaves it undefined', async () => {
+  // The concurrent-race DUPLICATE_REQUEST knows the key is taken, not by which row.
+  const { fetchImpl } = recordingFetch({
+    status: 200,
+    body: { success: false, errorCode: 'DUPLICATE_REQUEST' },
+  })
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    (error) => {
+      assert.equal(error.transactionId, undefined)
       return true
     },
   )

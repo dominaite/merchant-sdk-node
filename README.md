@@ -72,6 +72,25 @@ export DOMINAITE_BASE_URL=https://func-dom-gw-payments-dev-gwc-01.azurewebsites.
 # https://api.dominaite.com/payments
 ```
 
+Ping before your first mint. It is one signed GET that creates nothing, so anything that
+fails here is your credentials, your signing or your clock:
+
+```js
+import { DominaiteClient } from '@dominaite/merchant-sdk'
+
+const client = new DominaiteClient({
+  keyId: process.env.DOMINAITE_KEY_ID,
+  secret: process.env.DOMINAITE_SECRET,
+  baseUrl: process.env.DOMINAITE_BASE_URL, // omit in production
+})
+
+console.log(await client.ping())
+// { pong: true, merchantId: '...', serverTime: '...', clockSkewSeconds: 0 }
+```
+
+Keep an eye on `clockSkewSeconds`: the gateway rejects requests once it passes 300, so a
+number that keeps growing is your cue to fix NTP before payments start failing.
+
 `create-session.mjs`:
 
 ```js
@@ -183,9 +202,18 @@ const status = await client.getStatus(session.transactionId)
 ```
 
 `status` is one of: `pending`, `processing`, `succeeded`, `failed`, `refunded`,
-`partially_refunded`, `cancelled`, `disputed`, `abandoned`. While the session is still payable the
-response also carries `expiresAt`; after that instant a `pending` session can only become
-`abandoned`. An unknown transaction id throws an `ApiError` with `httpStatus` 404.
+`partially_refunded`, `cancelled`, `disputed`, `requires_capture`, `abandoned`. While the session
+is still payable the response also carries `expiresAt`; after that instant a `pending` session can
+only become `abandoned`. An unknown transaction id throws an `ApiError` with `httpStatus` 404.
+
+`succeeded` is the only value that means the payment is complete. Keep polling on `pending`,
+`processing` and `requires_capture` - none of them is terminal.
+
+`requires_capture` is **not** "unpaid": the payer has already paid and the funds are held
+awaiting capture. Never treat it as an abandoned order.
+
+Treat any status you do not recognise as still-open as well: a value the API adds later should
+make you keep polling, never silently close an order that is still live.
 
 Poll after the payer returns to you, or on your order timeout - not in a tight loop; the endpoint
 is rate limited per key.
@@ -207,7 +235,28 @@ Refusal codes on `CheckoutRefusedError.errorCode`:
 - `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later.
 - `DUPLICATE_REQUEST` - a session for this idempotency key is already open.
 - `ALREADY_PROCESSED` - this idempotency key's payment already completed.
+- `PRIOR_ATTEMPT_FAILED` - a prior attempt with this key failed terminally; use a fresh key.
 - `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
+
+### Recovering from a replay refusal
+
+When your idempotency key collides with an earlier attempt, the refusal names the transaction it
+collided with, so you can reconcile instead of minting a second payment:
+
+```js
+try {
+  session = await client.createCheckoutSession(params)
+} catch (error) {
+  if (error instanceof CheckoutRefusedError && error.transactionId) {
+    const status = await client.getStatus(error.transactionId)
+    // Now you know what the earlier attempt actually did.
+  }
+}
+```
+
+`error.transactionId` is `undefined` when the API did not name one (a concurrent-race
+`DUPLICATE_REQUEST` knows the key is taken but not yet by which row), so check it before use. The
+full refusal payload is on `error.result`.
 
 ## Verifying your signing
 
