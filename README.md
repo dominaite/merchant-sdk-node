@@ -151,8 +151,18 @@ A successful run prints `transactionId`, `orderId`, `cashierKey`, `cashierToken`
 `cashierKey` and `cashierToken` are per-payment session values, not credentials - but HTML-escape
 them when you template them into the page.
 
-That's the whole integration: the session call, the script tag, and your domain bound to your
-checkout by Dominaite during onboarding.
+That covers the paying half: the session call, the script tag, and your domain bound to your
+checkout by Dominaite during onboarding. The other half is finding out that the money arrived,
+which is what the next section is about. The shape of a full integration is:
+
+1. Create a session from your backend.
+2. Render the widget and let the payer pay.
+3. Receive a `payment.succeeded` webhook.
+4. Fulfill the order, keyed off your `orderReference`.
+
+Do not fulfill on the browser redirect back to your site. The payer closing the tab, a flaky
+network or a curious customer editing the return URL all produce the same "success" page; only
+the webhook (or `getStatus`) tells you what actually happened.
 
 There is a runnable version of the above in `examples/create-session.mjs` in this repo - it mints a
 session and reads the status back, using the same three environment variables.
@@ -193,7 +203,112 @@ const session = await client.createCheckoutSessionWithRetry(
 
 A session is valid for 2 hours. If the payer comes back later, create a new session.
 
-## Status polling
+## Webhooks
+
+Register an endpoint in the Dominaite dashboard, **Webhooks** tab: an HTTPS URL, the events you
+want, and a retry count. The signing secret (`whsec_...`) is shown **once** at creation - store it
+like your API secret. Regenerating it replaces the old one immediately. You can have up to 25
+active endpoints.
+
+Events you can subscribe to: `payment.succeeded`, `payment.failed`, `payment.requires_capture`,
+`payment.cancelled`, `payment.abandoned`, `payment.refunded`, `payment.disputed`. `succeeded` is
+the only one that means money in hand. In-flight states (`pending`, `processing`) are never
+webhooked - see the polling subsection below for those.
+
+The body is flat JSON, with no `success` wrapper to branch on:
+
+```json
+{
+  "id": "7f9c24e5-1d1f-4c0a-9b6c-2f3a4d5e6f70",
+  "type": "payment.succeeded",
+  "createdAt": "2026-08-20T14:00:00Z",
+  "data": {
+    "transactionId": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+    "status": "succeeded",
+    "previousStatus": "pending",
+    "kind": "sale",
+    "amount": 8440,
+    "grossAmount": 8701,
+    "surchargeAmount": 261,
+    "currency": "EUR",
+    "originalTransactionId": null,
+    "idempotencyKey": "order-123"
+  }
+}
+```
+
+Amounts are minor units. On `payment.*` the `amount` is what you are paid and `grossAmount` is the
+card movement; on `payment.refunded` the `amount` is what went back to the customer.
+
+### Verify first, parse second
+
+Every delivery carries `X-Webhook-Signature: t={unix_seconds},v1={hex}` - HMAC-SHA256 over
+`"{t}.{raw_body}"`, keyed with your endpoint secret. `verifyWebhook` checks it in constant time and
+rejects a timestamp more than 5 minutes off, which is what stops someone replaying a delivery they
+captured earlier.
+
+```js
+import express from 'express'
+import { verifyWebhook } from '@dominaite/merchant-sdk'
+
+const app = express()
+
+// express.raw, not express.json: the signature covers the exact bytes that arrived, and
+// JSON.parse + re-serialize does not reproduce them.
+app.post('/webhooks/dominaite', express.raw({ type: 'application/json' }), (req, res) => {
+  const raw = req.body.toString('utf8')
+
+  if (!verifyWebhook(raw, req.get('X-Webhook-Signature') ?? '', process.env.DOMINAITE_WEBHOOK_SECRET)) {
+    return res.sendStatus(400)
+  }
+
+  const event = JSON.parse(raw)
+  if (alreadyHandled(event.id)) {
+    return res.sendStatus(200)     // duplicate delivery, nothing to do
+  }
+
+  enqueue(event)                   // your queue, your worker, your database transaction
+  res.sendStatus(200)
+})
+```
+
+`verifyWebhook(payload, signatureHeader, secret, toleranceSeconds = 300, nowSeconds?)` returns a
+boolean. Anything an attacker controls - a tampered body, a wrong secret, a stale or future
+timestamp, a malformed or missing header - comes back `false` rather than throwing. It throws
+`TypeError` only when your own call is wrong (a Buffer instead of a string, an empty secret). The
+`nowSeconds` argument exists so tests can pin a fixed clock; leave it unset in production.
+
+The recipe is pinned by the same offline vector every Dominaite SDK ships, so a Node verifier and a
+Python one agree byte-for-byte. `npm test` reproduces it.
+
+### Respond fast, dedupe, expect duplicates
+
+- **Respond 2xx immediately.** Queue the work; never do the fulfillment inline. A slow handler
+  looks like a failed one and earns you retries.
+- **Delivery is at-least-once.** Dedupe on the top-level `id`, which is stable across retries of
+  the same delivery. Handling an event twice must be harmless.
+- **Retries**: up to your configured `RetryCount` (default 3, max 10, 0 disables), spaced 1m, 5m,
+  30m, 2h, 12h, for as long as the endpoint is active.
+- **Circuit breaker**: an endpoint that fails its initial attempt and every configured retry, over
+  and over, is auto-disabled. Any later successful delivery re-enables it. An endpoint you disable
+  by hand in the dashboard stays disabled.
+- Order is not guaranteed. Use `createdAt` and `previousStatus` rather than assuming arrival order.
+
+### Webhooks do not replace your reconciliation sweep
+
+**Keep the sweep.** A periodic job that lists your own open orders and calls `getStatus` on each is
+still mandatory, and webhooks complement it rather than retiring it. There are real windows where a
+delivery never lands: an endpoint sitting disabled parks its chain, and a delivery can be lost
+before it is ever queued. Nothing in the webhook pipeline is a durable outbox, so the sweep is your
+backstop for the money you would otherwise never hear about.
+
+Run it on a schedule, over every order that is not in a terminal state, and treat what `getStatus`
+says as the truth.
+
+### Fallback: polling and in-flight UX
+
+Webhooks tell you about terminal outcomes. For the "we are still working on it" screen the payer
+sees right after paying, and as the fallback when you have no endpoint registered yet, poll:
 
 ```js
 const status = await client.getStatus(session.transactionId)

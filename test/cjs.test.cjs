@@ -8,6 +8,7 @@ const sdk = require('../dist/cjs/index.js')
 test('the CommonJS build exports the same surface', () => {
   assert.equal(typeof sdk.DominaiteClient, 'function')
   assert.equal(typeof sdk.signRequest, 'function')
+  assert.equal(typeof sdk.verifyWebhook, 'function')
   for (const name of ['DominaiteError', 'ApiError', 'AuthenticationError', 'CheckoutRefusedError', 'TransportError']) {
     assert.equal(typeof sdk[name], 'function', `${name} missing from the CJS build`)
   }
