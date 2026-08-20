@@ -8,6 +8,7 @@ export {
 } from './errors.js'
 export { signRequest } from './signing.js'
 export type { SignRequestInput } from './signing.js'
+export { verifyWebhook } from './webhooks.js'
 export type {
   CheckoutCustomer,
   CheckoutSession,
