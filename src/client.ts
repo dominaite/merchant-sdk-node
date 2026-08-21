@@ -12,7 +12,7 @@ import type {
 } from './types.js'
 
 const DEFAULT_BASE_URL = 'https://api.dominaite.com/payments'
-const SESSIONS_PATH = '/merchant-api/bridgerpay/checkout/sessions'
+const SESSIONS_PATH = '/merchant-api/checkout/sessions'
 const PING_PATH = '/merchant-api/ping'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
 const SDK_VERSION = '0.1.2'

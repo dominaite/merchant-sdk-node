@@ -417,11 +417,11 @@ signRequest({
   secret: 'dms_...',
   timestamp: '1755302400',                                  // unix SECONDS
   method: 'POST',
-  path: '/merchant-api/bridgerpay/checkout/sessions',        // path only, no host
+  path: '/merchant-api/checkout/sessions',                   // path only, no host
   idempotencyKey: '00000000-0000-4000-8000-000000000001',    // '' for GET
   body: '{"amount":2500,"currency":"EUR","orderReference":"order-1042"}',  // '' for GET
 })
-// '95759958a0a0a9bd3e6e37101c01e8e7fee1166406e4ac2ff488764f5f742cbf'
+// '8f5fba0b29a8eea81b76a0e6d7119e79ec68f586910f77713b045652e5ce9b74'
 ```
 
 The signed payload is five lines:
