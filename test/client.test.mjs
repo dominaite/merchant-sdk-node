@@ -413,6 +413,27 @@ test('getStatus does not follow a redirect either', async () => {
   assert.equal(calls[0].init.redirect, 'manual')
 })
 
+test('an opaque redirect is caught too, not misreported as a non-JSON response', async () => {
+  // What a spec-compliant runtime returns for redirect: 'manual' - status 0, type
+  // opaqueredirect, empty body. Node returns the real 3xx instead, so only this shape
+  // exercises the second half of the guard.
+  let attempts = 0
+  const fetchImpl = async () => {
+    attempts++
+    return { status: 0, type: 'opaqueredirect', text: async () => '' }
+  }
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    (error) => {
+      assert.ok(error instanceof ApiError)
+      assert.match(error.message, /never redirects/)
+      return true
+    },
+  )
+  assert.equal(attempts, 1)
+})
+
 test('the retry helper does not retry a redirect', async () => {
   let attempts = 0
   const fetchImpl = async () => {

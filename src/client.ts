@@ -268,12 +268,15 @@ export class DominaiteClient {
       throw new TransportError(`Could not reach the Dominaite API: ${describe(error)}`)
     }
 
-    if (response.status >= 300 && response.status < 400) {
+    // Node hands back the real 3xx here; a spec-compliant runtime hands back an opaque
+    // redirect instead - status 0, no body. Both mean the same thing.
+    if ((response.status >= 300 && response.status < 400) || response.type === 'opaqueredirect') {
       // Not retryable, and not a response we will parse. The Dominaite API never emits
       // 3xx, so a redirect means something between you and it is answering instead.
+      const status = response.type === 'opaqueredirect' ? 'opaque redirect' : `HTTP ${response.status}`
       throw new ApiError(
         response.status,
-        `Unexpected redirect response (HTTP ${response.status}); the Dominaite API never redirects. ` +
+        `Unexpected redirect response (${status}); the Dominaite API never redirects. ` +
           'Check your baseUrl and any proxy in front of it.',
       )
     }
