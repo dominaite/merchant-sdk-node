@@ -4,13 +4,16 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 const DEFAULT_TOLERANCE_SECONDS = 300
 
 const HEX_64 = /^[0-9a-f]{64}$/
+const DIGITS = /^[0-9]+$/
 
 /**
  * Verifies the `X-Webhook-Signature` header on an incoming webhook delivery.
  *
  * Signature: lowercase hex HMAC-SHA256 over the ASCII concatenation `"{t}.{payload}"`,
- * keyed with the UTF-8 bytes of the endpoint's `whsec_` secret. The header is
- * `t={unix_seconds},v1={hex}`. The MAC is compared in constant time, and a delivery
+ * keyed with the UTF-8 bytes of the endpoint's `whsec_` secret. The header is exactly
+ * `t={unix_seconds},v1={64 lowercase hex}` - one `t`, one `v1`, no whitespace, and
+ * unknown keys ignored so a future scheme version can ride along. Any other shape is
+ * rejected the same way a bad MAC is. The MAC is compared in constant time, and a delivery
  * whose timestamp is more than `toleranceSeconds` away from now (in EITHER direction)
  * is rejected even when the MAC is good - that is what stops a captured delivery from
  * being replayed at you later.
@@ -74,15 +77,9 @@ export function verifyWebhook(
     .update(`${parsed.timestamp}.${payload}`, 'utf8')
     .digest('hex')
 
-  // Compare every candidate before looking at the clock, so the work done here does not
-  // depend on whether the timestamp happened to be fresh.
-  let macOk = false
-  for (const candidate of parsed.signatures) {
-    if (constantTimeEquals(candidate, expected)) {
-      macOk = true
-    }
-  }
-  if (!macOk) {
+  // Compare before looking at the clock, so the work done here does not depend on
+  // whether the timestamp happened to be fresh.
+  if (!constantTimeEquals(parsed.signature, expected)) {
     return false
   }
 
@@ -91,48 +88,70 @@ export function verifyWebhook(
 }
 
 interface ParsedSignatureHeader {
-  /** The timestamp exactly as it appeared, since it is signed as text. */
+  /** The raw digits exactly as they appeared, since the timestamp is signed as text. */
   timestamp: string
-  signatures: string[]
+  signature: string
 }
 
 /**
- * Splits `t=...,v1=...` into its parts. Unknown keys are ignored so a future scheme
- * version can be added to the header without breaking this verifier, and repeated `v1`
- * entries are all kept so a secret rotation that signs twice still verifies.
+ * Parses the header against the grammar in WEBHOOKS-CONTRACT.md: a comma-separated list
+ * of `key=value` elements, no whitespace anywhere, exactly one `t` and exactly one `v1`.
+ *
+ * Unknown keys are ignored, values and repeats included, so a later scheme version (a
+ * `v2` rollover) can ride along on the same header. Everything else rejects, including a
+ * repeat of `t` or `v1` even when one of the candidates carries a good MAC. The platform
+ * never rotates secrets with overlapping signatures, so a second candidate is not a
+ * merchant feature we would be breaking - it is an attacker appending one junk element in
+ * front of a captured valid one and watching a lenient verifier pick the winner.
  */
 function parseSignatureHeader(header: string): ParsedSignatureHeader | null {
+  // The platform emits no whitespace. Trimming it away here would let a caller smuggle
+  // one shape past this parser and a different shape past someone else's.
+  if (/\s/.test(header)) {
+    return null
+  }
+
   let timestamp: string | undefined
-  const signatures: string[] = []
+  let signature: string | undefined
 
   for (const part of header.split(',')) {
     const separator = part.indexOf('=')
     if (separator === -1) {
-      continue
+      return null
     }
-    const key = part.slice(0, separator).trim()
-    const value = part.slice(separator + 1).trim()
+    const key = part.slice(0, separator)
+    const value = part.slice(separator + 1)
 
-    if (key === 't' && timestamp === undefined) {
+    if (key === 't') {
+      if (timestamp !== undefined) {
+        return null
+      }
       timestamp = value
     } else if (key === 'v1') {
-      signatures.push(value)
+      if (signature !== undefined) {
+        return null
+      }
+      signature = value
     }
   }
 
-  // A digit-only timestamp keeps Number() away from '0x10', ' 12 ', '1e3' and friends.
-  if (timestamp === undefined || !/^[0-9]{1,15}$/.test(timestamp) || signatures.length === 0) {
+  // Digits only, and the raw substring is what gets signed - reformatting it through
+  // Number() would make '+1755700000' and '01755700000' verify as the plain value.
+  if (timestamp === undefined || !DIGITS.test(timestamp)) {
+    return null
+  }
+  if (signature === undefined || !HEX_64.test(signature)) {
     return null
   }
 
-  return { timestamp, signatures }
+  return { timestamp, signature }
 }
 
 function constantTimeEquals(candidate: string, expected: string): boolean {
-  // timingSafeEqual throws on a length mismatch, and the candidate is attacker-shaped.
-  // The expected length is a public constant, so screening on it leaks nothing.
-  if (!HEX_64.test(candidate.toLowerCase())) {
+  // timingSafeEqual throws on a length mismatch. The candidate is already known to be 64
+  // lowercase hex by the time it gets here, and the expected length is a public constant.
+  if (!HEX_64.test(candidate)) {
     return false
   }
-  return timingSafeEqual(Buffer.from(candidate.toLowerCase(), 'hex'), Buffer.from(expected, 'hex'))
+  return timingSafeEqual(Buffer.from(candidate, 'hex'), Buffer.from(expected, 'hex'))
 }
