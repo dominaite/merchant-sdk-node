@@ -46,17 +46,28 @@ export interface CheckoutSession {
   [key: string]: unknown
 }
 
-export type TransactionStatus =
-  | 'pending'
-  | 'processing'
-  | 'succeeded'
-  | 'failed'
-  | 'refunded'
-  | 'partially_refunded'
-  | 'cancelled'
-  | 'disputed'
-  | 'requires_capture'
-  | 'abandoned'
+/**
+ * Every status the merchant API can report, in the gateway's own order.
+ *
+ * A value here, not a bare union, so the list survives compilation and a test can
+ * compare it against the published contract fixture. Recognising a status is not the
+ * same as closing an order - see {@link DominaiteClient.getStatus} for which ones are
+ * terminal.
+ */
+export const TRANSACTION_STATUSES = [
+  'pending',
+  'processing',
+  'succeeded',
+  'failed',
+  'refunded',
+  'partially_refunded',
+  'cancelled',
+  'disputed',
+  'requires_capture',
+  'abandoned',
+] as const
+
+export type TransactionStatus = (typeof TRANSACTION_STATUSES)[number]
 
 /** What {@link DominaiteClient.getStatus} returns. */
 export interface CheckoutStatus {

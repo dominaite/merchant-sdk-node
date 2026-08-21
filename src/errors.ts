@@ -46,6 +46,17 @@ export class AuthenticationError extends DominaiteError {
  * concurrent-race DUPLICATE_REQUEST, which knows a key was taken but not yet by which
  * row. Always check before using it.
  */
+export const SESSION_REFUSAL_ERROR_CODES = [
+  'PAYMENT_PROCESSING_UNAVAILABLE',
+  'DUPLICATE_REQUEST',
+  'ALREADY_PROCESSED',
+  'PRIOR_ATTEMPT_FAILED',
+  'IDEMPOTENCY_KEY_REUSED',
+] as const
+
+/** One of the refusal codes this SDK knows about. Unknown codes arrive as plain strings. */
+export type SessionRefusalErrorCode = (typeof SESSION_REFUSAL_ERROR_CODES)[number]
+
 export class CheckoutRefusedError extends DominaiteError {
   readonly errorCode: string
   /** The payment this idempotency key collided with, when the API named one. */
