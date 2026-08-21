@@ -46,16 +46,27 @@ export class AuthenticationError extends DominaiteError {
  * concurrent-race DUPLICATE_REQUEST, which knows a key was taken but not yet by which
  * row. Always check before using it.
  */
+/** Business refusals: HTTP 200 with success=false. They arrive as {@link CheckoutRefusedError}. */
 export const SESSION_REFUSAL_ERROR_CODES = [
   'PAYMENT_PROCESSING_UNAVAILABLE',
   'DUPLICATE_REQUEST',
   'ALREADY_PROCESSED',
-  'PRIOR_ATTEMPT_FAILED',
   'IDEMPOTENCY_KEY_REUSED',
+  'PRIOR_ATTEMPT_FAILED',
 ] as const
 
 /** One of the refusal codes this SDK knows about. Unknown codes arrive as plain strings. */
 export type SessionRefusalErrorCode = (typeof SESSION_REFUSAL_ERROR_CODES)[number]
+
+/**
+ * Input validation on the create endpoint. A different shape from the refusals above:
+ * HTTP 400, not success=false, so these arrive as {@link ApiError} and not
+ * {@link CheckoutRefusedError}.
+ */
+export const VALIDATION_ERROR_CODES = ['IDEMPOTENCY_KEY_REQUIRED'] as const
+
+/** One of the validation codes this SDK knows about. Unknown codes arrive as plain strings. */
+export type ValidationErrorCode = (typeof VALIDATION_ERROR_CODES)[number]
 
 export class CheckoutRefusedError extends DominaiteError {
   readonly errorCode: string
@@ -77,13 +88,22 @@ export class CheckoutRefusedError extends DominaiteError {
   }
 }
 
-/** The API answered, but with an unexpected or rejecting response. */
+/**
+ * The API answered, but with an unexpected or rejecting response.
+ *
+ * `errorCode` carries the machine-readable code when the API sent one - notably the
+ * validation codes above on a 400 (IDEMPOTENCY_KEY_REQUIRED). It is undefined when the
+ * response had no code to give, so check before branching on it.
+ */
 export class ApiError extends DominaiteError {
   readonly httpStatus: number
+  /** The API's machine-readable code, when it sent one. See {@link VALIDATION_ERROR_CODES}. */
+  readonly errorCode?: string
 
-  constructor(httpStatus: number, message: string) {
+  constructor(httpStatus: number, message: string, errorCode?: string) {
     super(message)
     this.httpStatus = httpStatus
+    this.errorCode = errorCode
   }
 }
 

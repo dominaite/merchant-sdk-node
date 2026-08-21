@@ -6,8 +6,9 @@ export {
   DominaiteError,
   SESSION_REFUSAL_ERROR_CODES,
   TransportError,
+  VALIDATION_ERROR_CODES,
 } from './errors.js'
-export type { SessionRefusalErrorCode } from './errors.js'
+export type { SessionRefusalErrorCode, ValidationErrorCode } from './errors.js'
 export { signRequest } from './signing.js'
 export type { SignRequestInput } from './signing.js'
 export { verifyWebhook } from './webhooks.js'
