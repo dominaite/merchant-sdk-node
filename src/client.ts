@@ -293,9 +293,13 @@ export class DominaiteClient {
       )
     }
     if (response.status >= 400) {
+      // Carry the machine-readable code: a validation rejection like
+      // IDEMPOTENCY_KEY_REQUIRED is only actionable if the caller can branch on it.
+      const errorCode = stringOr(payload['errorCode'], stringOr(envelopeError['code'], ''))
       throw new ApiError(
         response.status,
         stringOr(payload['errorMessage'], stringOr(envelopeError['message'], 'Request rejected')),
+        errorCode === '' ? undefined : errorCode,
       )
     }
 
