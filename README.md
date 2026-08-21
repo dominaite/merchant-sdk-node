@@ -343,6 +343,7 @@ Everything thrown by the SDK extends `DominaiteError`.
 | `AuthenticationError` | 401/403. `errorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `TransportError` | Network failure, timeout, or 5xx (`MERCHANT_API_UNAVAILABLE`). | Retry with the **same** idempotency key. |
 | `ApiError` | Any other rejecting or unexpected response; `httpStatus` carries the code. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. |
+| `ApiError` with a 3xx `httpStatus` | The host you called answered with a redirect. | The Dominaite API never redirects, so the SDK refuses to follow one: your signed headers would be handed to whatever `Location` names, and its answer would look authentic. Check `baseUrl` and any proxy in front of it. |
 | `TypeError` | Bad arguments (float amount, missing field, malformed key id). | Fix the call; nothing was sent. |
 
 Refusal codes on `CheckoutRefusedError.errorCode`:

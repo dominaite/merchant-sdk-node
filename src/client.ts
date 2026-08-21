@@ -251,11 +251,25 @@ export class DominaiteClient {
       response = await this.#fetch(this.#baseUrl + path, {
         method,
         headers,
+        // Never follow a redirect: the hop would carry the signed headers to whatever
+        // host the Location names, 301/302/303 would silently turn the POST into a GET,
+        // and the answer coming back would be that host's, not the gateway's.
+        redirect: 'manual',
         ...(body === null ? {} : { body }),
         signal: AbortSignal.timeout(this.#timeoutMs),
       })
     } catch (error) {
       throw new TransportError(`Could not reach the Dominaite API: ${describe(error)}`)
+    }
+
+    if (response.status >= 300 && response.status < 400) {
+      // Not retryable, and not a response we will parse. The Dominaite API never emits
+      // 3xx, so a redirect means something between you and it is answering instead.
+      throw new ApiError(
+        response.status,
+        `Unexpected redirect response (HTTP ${response.status}); the Dominaite API never redirects. ` +
+          'Check your baseUrl and any proxy in front of it.',
+      )
     }
 
     let raw: string
