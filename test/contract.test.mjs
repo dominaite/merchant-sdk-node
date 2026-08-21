@@ -4,10 +4,12 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import {
+  ApiError,
   CheckoutRefusedError,
   DominaiteClient,
   SESSION_REFUSAL_ERROR_CODES,
   TRANSACTION_STATUSES,
+  VALIDATION_ERROR_CODES,
 } from '../dist/esm/index.js'
 import { VECTOR } from './vector.mjs'
 
@@ -102,13 +104,16 @@ test('the contract refusal example raises CheckoutRefusedError, not a session', 
   )
 })
 
+test('the refusal codes are exactly the contract, in order', () => {
+  assert.deepEqual([...SESSION_REFUSAL_ERROR_CODES], CONTRACT.sessionRefusalErrorCodes)
+})
+
+test('the validation codes are exactly the contract, in order', () => {
+  assert.deepEqual([...VALIDATION_ERROR_CODES], CONTRACT.validationErrorCodes)
+})
+
 test('every refusal code in the contract is recognised and carried through', async () => {
   for (const code of CONTRACT.sessionRefusalErrorCodes) {
-    assert.ok(
-      SESSION_REFUSAL_ERROR_CODES.includes(code),
-      `refusal code not known to this SDK: ${code}`,
-    )
-
     const { fetchImpl } = recordingFetch({
       ...CONTRACT.endpoints.createCheckoutSession.refusalExample,
       errorCode: code,
@@ -123,6 +128,34 @@ test('every refusal code in the contract is recognised and carried through', asy
 
     assert.ok(error instanceof CheckoutRefusedError)
     assert.equal(error.errorCode, code)
+  }
+})
+
+test('a validation code arrives as an ApiError 400 with the code intact', async () => {
+  // A different shape from the refusals: HTTP 400, no success=false envelope. Both
+  // wire forms the gateway uses must reach the caller as a branchable code, or
+  // "which input did I get wrong" is only recoverable by reading English prose.
+  for (const code of CONTRACT.validationErrorCodes) {
+    const bodies = [
+      { errorCode: code, errorMessage: 'Idempotency-Key header is required.' },
+      { success: false, error: { code, message: 'Idempotency-Key header is required.' } },
+    ]
+
+    for (const body of bodies) {
+      const { fetchImpl } = recordingFetch(body, 400)
+      const error = await rejects(() =>
+        makeClient(fetchImpl).createCheckoutSession({
+          amount: 8440,
+          currency: 'EUR',
+          orderReference: 'order-1042',
+        }),
+      )
+
+      assert.ok(error instanceof ApiError, `expected ApiError for ${code}`)
+      assert.ok(!(error instanceof CheckoutRefusedError))
+      assert.equal(error.httpStatus, 400)
+      assert.equal(error.errorCode, code)
+    }
   }
 })
 
@@ -188,12 +221,12 @@ function declaredFields(interfaceName) {
   return names
 }
 
-function recordingFetch(body) {
+function recordingFetch(body, status = 200) {
   const calls = []
   const fetchImpl = async (url, init) => {
     calls.push({ url, init })
     return new Response(JSON.stringify(body), {
-      status: 200,
+      status,
       headers: { 'Content-Type': 'application/json' },
     })
   }
