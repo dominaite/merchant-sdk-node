@@ -118,7 +118,15 @@ try {
     theme: 'dark',
   })
 
-  console.log(session)
+  // Never log cashierToken, and never log the whole session object either - it
+  // carries the token. Log the fields you actually need to trace an order.
+  console.log({
+    transactionId: session.transactionId,
+    orderId: session.orderId,
+    amount: session.amount,
+    currency: session.currency,
+    expiresAt: session.expiresAt,
+  })
   // Store session.transactionId against your order, then hand cashierKey +
   // cashierToken to the page that renders the widget.
 } catch (error) {
@@ -138,8 +146,8 @@ try {
 node create-session.mjs
 ```
 
-A successful run prints `transactionId`, `orderId`, `cashierKey`, `cashierToken`, `amount`,
-`currency`, `expiresAt`. Render the widget with the last two:
+The session carries `transactionId`, `orderId`, `cashierKey`, `cashierToken`, `amount`,
+`currency` and `expiresAt`. Render the widget with the two cashier fields:
 
 ```html
 <div id="checkout"></div>
@@ -148,8 +156,9 @@ A successful run prints `transactionId`, `orderId`, `cashierKey`, `cashierToken`
         data-cashier-token="CASHIER_TOKEN_FROM_SESSION"></script>
 ```
 
-`cashierKey` and `cashierToken` are per-payment session values, not credentials - but HTML-escape
-them when you template them into the page.
+`cashierKey` and `cashierToken` are per-payment session values rather than account credentials,
+but `cashierToken` is what lets a browser drive the payment: keep it out of your logs, your error
+reports and any analytics payload, and HTML-escape both when you template them into the page.
 
 That covers the paying half: the session call, the script tag, and your domain bound to your
 checkout by Dominaite during onboarding. The other half is finding out that the money arrived,
