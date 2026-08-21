@@ -371,6 +371,90 @@ test('credentials are prefix-checked at construction', () => {
   assert.throws(() => new DominaiteClient({ keyId: KEY_ID, secret: 'nope' }), TypeError)
 })
 
+test('a redirect is never followed, whatever the 3xx status', async () => {
+  // A followed hop would carry X-Signature, X-Api-Key-Id, X-Timestamp and
+  // Idempotency-Key to the host in Location, and 301/302/303 would downgrade the POST
+  // to a GET on the way. Whatever that host answered would then look authentic.
+  for (const status of [301, 302, 303, 307, 308]) {
+    const calls = []
+    const fetchImpl = async (url, init) => {
+      calls.push(init)
+      return new Response(JSON.stringify({ success: true, checkout: CHECKOUT }), {
+        status,
+        headers: { Location: 'https://attacker.example.test/sessions' },
+      })
+    }
+
+    await assert.rejects(
+      () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+      (error) => {
+        assert.ok(error instanceof ApiError, `HTTP ${status} should be an ApiError`)
+        assert.equal(error.httpStatus, status)
+        assert.match(error.message, /never redirects/)
+        return true
+      },
+    )
+
+    assert.equal(calls.length, 1, `HTTP ${status} must not fire a second request`)
+    assert.equal(calls[0].redirect, 'manual', 'fetch must be told not to follow redirects')
+  }
+})
+
+test('getStatus does not follow a redirect either', async () => {
+  const { fetchImpl, calls } = recordingFetch(() =>
+    new Response(JSON.stringify({ status: 'succeeded' }), {
+      status: 302,
+      headers: { Location: 'https://attacker.example.test/status' },
+    }),
+  )
+
+  await assert.rejects(() => makeClient(fetchImpl).getStatus(CHECKOUT.transactionId), ApiError)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].init.redirect, 'manual')
+})
+
+test('an opaque redirect is caught too, not misreported as a non-JSON response', async () => {
+  // What a spec-compliant runtime returns for redirect: 'manual' - status 0, type
+  // opaqueredirect, empty body. Node returns the real 3xx instead, so only this shape
+  // exercises the second half of the guard.
+  let attempts = 0
+  const fetchImpl = async () => {
+    attempts++
+    return { status: 0, type: 'opaqueredirect', text: async () => '' }
+  }
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    (error) => {
+      assert.ok(error instanceof ApiError)
+      assert.match(error.message, /never redirects/)
+      return true
+    },
+  )
+  assert.equal(attempts, 1)
+})
+
+test('the retry helper does not retry a redirect', async () => {
+  let attempts = 0
+  const fetchImpl = async () => {
+    attempts++
+    return new Response(JSON.stringify({ success: true, checkout: CHECKOUT }), {
+      status: 302,
+      headers: { Location: 'https://attacker.example.test/sessions' },
+    })
+  }
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, { attempts: 3, baseDelayMs: 1 }),
+    (error) => {
+      assert.ok(error instanceof ApiError)
+      assert.ok(!(error instanceof TransportError))
+      return true
+    },
+  )
+  assert.equal(attempts, 1)
+})
+
 test('a non-JSON response is an ApiError, not a crash', async () => {
   const fetchImpl = async () => new Response('<html>502 Bad Gateway</html>', { status: 200 })
   await assert.rejects(() => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS), ApiError)

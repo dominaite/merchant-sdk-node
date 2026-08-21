@@ -110,5 +110,9 @@ export class ApiError extends DominaiteError {
 /**
  * Network-level failure or a 5xx - the request may or may not have reached the API.
  * Safe to retry WITH THE SAME idempotency key; a retried key never creates a second payment.
+ *
+ * "Safe" means no double charge, not "you get the first session back". If the earlier
+ * attempt did reach the API, the retry is refused as a replay ({@link CheckoutRefusedError})
+ * and the first session's cashier fields are gone for good.
  */
 export class TransportError extends DominaiteError {}

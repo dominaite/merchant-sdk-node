@@ -36,7 +36,10 @@ export interface CheckoutSession {
   orderId: string
   /** Feeds the widget's data-cashier-key. Per-payment value, not a credential. */
   cashierKey: string
-  /** Feeds the widget's data-cashier-token. Per-payment value, not a credential. */
+  /**
+   * Feeds the widget's data-cashier-token. Per-payment value, not a credential, but it
+   * drives the payment - do not log it, and do not log the whole session object either.
+   */
   cashierToken: string
   /** MINOR units. */
   amount: number

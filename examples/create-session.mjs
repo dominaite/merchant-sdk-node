@@ -30,7 +30,15 @@ try {
     customer: { firstName: 'Ana', lastName: 'Kirova', email: 'ana@example.com' },
   })
 
-  console.log('session minted:', session)
+  // Never log cashierToken (or the whole session object, which contains it): it is
+  // what lets a browser drive this payment.
+  console.log('session minted:', {
+    transactionId: session.transactionId,
+    orderId: session.orderId,
+    amount: session.amount,
+    currency: session.currency,
+    expiresAt: session.expiresAt,
+  })
 
   const status = await client.getStatus(session.transactionId)
   console.log('status:', status.status)
