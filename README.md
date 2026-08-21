@@ -208,6 +208,23 @@ const session = await client.createCheckoutSessionWithRetry(
 )
 ```
 
+**A retry is protection against a double charge, not a way to recover the first session.** The
+two outcomes of retrying a key differ:
+
+- The first attempt never reached the gateway. The retry is an ordinary create and you get a
+  session back.
+- The first attempt did reach the gateway and took the key. The retry comes back HTTP 200 with
+  `success: false` and a replay code - `DUPLICATE_REQUEST`, `ALREADY_PROCESSED`,
+  `PRIOR_ATTEMPT_FAILED` or `IDEMPOTENCY_KEY_REUSED` - which this SDK throws as
+  `CheckoutRefusedError`. The original session's `cashierKey` and `cashierToken` are **not**
+  returned, by that call or any other, so a payer who never got the widget cannot be handed the
+  first session.
+
+So write the timeout path to expect a refusal, not a session. When the refusal names a
+`transactionId`, read it back with `getStatus` to find out what the first attempt did (see
+"Recovering from a replay refusal" below). If it turns out the first attempt never became a
+payment you can pay, mint a new session under a **fresh** idempotency key.
+
 ## Sessions expire
 
 A session is valid for 2 hours. If the payer comes back later, create a new session.
@@ -350,7 +367,7 @@ Everything thrown by the SDK extends `DominaiteError`.
 |---|---|---|
 | `CheckoutRefusedError` | The API answered, `success: false`. `errorCode` carries the reason. | Branch on `errorCode`. Do not blind-retry. |
 | `AuthenticationError` | 401/403. `errorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
-| `TransportError` | Network failure, timeout, or 5xx (`MERCHANT_API_UNAVAILABLE`). | Retry with the **same** idempotency key. |
+| `TransportError` | Network failure, timeout, or 5xx (`MERCHANT_API_UNAVAILABLE`). | Retry with the **same** idempotency key, and expect a replay refusal if the first attempt did land. |
 | `ApiError` | Any other rejecting or unexpected response; `httpStatus` carries the code. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. |
 | `ApiError` with a 3xx `httpStatus` | The host you called answered with a redirect. | The Dominaite API never redirects, so the SDK refuses to follow one: your signed headers would be handed to whatever `Location` names, and its answer would look authentic. Check `baseUrl` and any proxy in front of it. |
 | `TypeError` | Bad arguments (float amount, missing field, malformed key id). | Fix the call; nothing was sent. |
@@ -382,6 +399,10 @@ try {
 `error.transactionId` is `undefined` when the API did not name one (a concurrent-race
 `DUPLICATE_REQUEST` knows the key is taken but not yet by which row), so check it before use. The
 full refusal payload is on `error.result`.
+
+What you get back is the status of the earlier payment, not the earlier session: no refusal
+carries `cashierKey` or `cashierToken`, so there is no way to re-render the widget for a session
+you lost. Reconcile against the status, and start a fresh key when you need a payable session.
 
 ## Verifying your signing
 

@@ -119,6 +119,12 @@ export class DominaiteClient {
    * never opens a second payment for a key it has already seen.
    *
    * Refusals and authentication failures are not retried; they will not change.
+   *
+   * This buys you protection from a double charge, not recovery of the first session. If
+   * an earlier attempt did reach the gateway and take the key, the retry comes back as a
+   * replay refusal (CheckoutRefusedError: DUPLICATE_REQUEST, ALREADY_PROCESSED,
+   * PRIOR_ATTEMPT_FAILED, IDEMPOTENCY_KEY_REUSED) - the first session's cashier fields are
+   * not returned. Reconcile with getStatus(), then mint a new session under a fresh key.
    */
   async createCheckoutSessionWithRetry(
     params: CreateCheckoutSessionParams,
