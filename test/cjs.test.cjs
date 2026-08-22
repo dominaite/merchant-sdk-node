@@ -9,7 +9,15 @@ test('the CommonJS build exports the same surface', () => {
   assert.equal(typeof sdk.DominaiteClient, 'function')
   assert.equal(typeof sdk.signRequest, 'function')
   assert.equal(typeof sdk.verifyWebhook, 'function')
-  for (const name of ['DominaiteError', 'ApiError', 'AuthenticationError', 'CheckoutRefusedError', 'TransportError']) {
+  const errors = [
+    'DominaiteError',
+    'ApiError',
+    'AuthenticationError',
+    'CheckoutRefusedError',
+    'RateLimitError',
+    'TransportError',
+  ]
+  for (const name of errors) {
     assert.equal(typeof sdk[name], 'function', `${name} missing from the CJS build`)
   }
 })

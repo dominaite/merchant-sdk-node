@@ -108,6 +108,31 @@ export class ApiError extends DominaiteError {
 }
 
 /**
+ * HTTP 429: you sent more requests than your key or your IP is allowed.
+ *
+ * Platform limits are 60 requests per minute per API key and 120 per minute per IP.
+ * Both are enforced on a rolling window, so a burst that fits inside one minute still
+ * counts against the next.
+ *
+ * This is NOT retried automatically. The SDK cannot know how long to wait without
+ * making the burst worse, so it hands the decision back to you: sleep for
+ * `retryAfterSeconds` and send the request again with the SAME idempotency key.
+ *
+ * `retryAfterSeconds` is the `Retry-After` header when the API sent it as a whole
+ * number of seconds, and null otherwise - the header is also allowed to carry an HTTP
+ * date, which this SDK does not translate. Fall back to your own backoff when it is null.
+ */
+export class RateLimitError extends DominaiteError {
+  /** Seconds to wait before retrying, or null when the API did not give a usable value. */
+  readonly retryAfterSeconds: number | null
+
+  constructor(message: string, retryAfterSeconds: number | null = null) {
+    super(message)
+    this.retryAfterSeconds = retryAfterSeconds
+  }
+}
+
+/**
  * Network-level failure or a 5xx - the request may or may not have reached the API.
  * Safe to retry WITH THE SAME idempotency key; a retried key never creates a second payment.
  *

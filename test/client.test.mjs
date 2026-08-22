@@ -6,6 +6,7 @@ import {
   AuthenticationError,
   CheckoutRefusedError,
   DominaiteClient,
+  RateLimitError,
   TransportError,
   signRequest,
 } from '../dist/esm/index.js'
@@ -458,4 +459,243 @@ test('the retry helper does not retry a redirect', async () => {
 test('a non-JSON response is an ApiError, not a crash', async () => {
   const fetchImpl = async () => new Response('<html>502 Bad Gateway</html>', { status: 200 })
   await assert.rejects(() => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS), ApiError)
+})
+
+// A6: a plaintext baseUrl puts X-Api-Key-Id, X-Timestamp and X-Signature on the wire in
+// the clear, and lets anything on the path answer in the API's place.
+
+// A13: a body read has a ceiling, so a wrong host cannot make the SDK buffer until the
+// process dies.
+
+test('an oversized response body is a TransportError, and the read stops at the cap', async () => {
+  const chunk = new Uint8Array(1024 * 1024).fill(0x20) // 1MB of spaces
+  let chunksPulled = 0
+
+  const fetchImpl = async () =>
+    new Response(
+      new ReadableStream({
+        pull(controller) {
+          chunksPulled++
+          controller.enqueue(chunk.slice())
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    (error) => {
+      assert.ok(error instanceof TransportError, 'an oversized body is the retryable class')
+      assert.match(error.message, /exceeded/)
+      return true
+    },
+  )
+
+  // The cap is 10MB. Without one this stream never ends, so finishing at all is the
+  // result; the bound proves it stopped there rather than somewhere far past it.
+  assert.ok(chunksPulled <= 16, `read ${chunksPulled} MB before stopping`)
+})
+
+test('a large body under the cap is still read, across chunk boundaries', async () => {
+  const status = {
+    transactionId: CHECKOUT.transactionId,
+    status: 'succeeded',
+    amount: 2500,
+    currency: 'EUR',
+    // Multi-byte text, sized so the UTF-8 encoding lands mid-character on a chunk split.
+    note: 'зака'.repeat(50_000),
+  }
+  const encoded = new TextEncoder().encode(JSON.stringify(status))
+
+  const fetchImpl = async () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          for (let offset = 0; offset < encoded.length; offset += 4093) {
+            controller.enqueue(encoded.slice(offset, offset + 4093))
+          }
+          controller.close()
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )
+
+  const result = await makeClient(fetchImpl).getStatus(CHECKOUT.transactionId)
+  assert.deepEqual(result, status)
+})
+
+// A12: the limits are counted in Unicode code points, so non-Latin text is not rejected
+// for being two bytes a character.
+
+test('a 100-character Cyrillic orderReference passes validation', async () => {
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+  const orderReference = 'зака'.repeat(25) // 100 characters, 200 bytes in UTF-8
+
+  assert.equal([...orderReference].length, 100)
+  assert.equal(Buffer.byteLength(orderReference, 'utf8'), 200)
+
+  await makeClient(fetchImpl).createCheckoutSession({ ...SESSION_PARAMS, orderReference })
+  assert.equal(calls.length, 1, 'a 100-code-point reference must reach the network')
+})
+
+test('a 100-code-point idempotency key passes, and 101 does not', async () => {
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+  const client = makeClient(fetchImpl)
+
+  await client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey: 'ключ'.repeat(25) })
+  assert.equal(calls.length, 1)
+
+  await assert.rejects(
+    () => client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey: `${'ключ'.repeat(25)}я` }),
+    TypeError,
+  )
+  await assert.rejects(
+    () => client.createCheckoutSession({ ...SESSION_PARAMS, orderReference: 'з'.repeat(101) }),
+    TypeError,
+  )
+  assert.equal(calls.length, 1, 'over-length fields must never reach the network')
+})
+
+test('orderReference must be a non-empty string', async () => {
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+  const client = makeClient(fetchImpl)
+
+  for (const orderReference of ['', 1042, {}]) {
+    await assert.rejects(
+      () => client.createCheckoutSession({ ...SESSION_PARAMS, orderReference }),
+      TypeError,
+      `orderReference ${String(orderReference)} should be rejected`,
+    )
+  }
+  assert.equal(calls.length, 0)
+})
+
+// A11: 429 is its own error, and never an automatic retry.
+
+test('a 429 is a RateLimitError carrying an integer Retry-After', async () => {
+  const fetchImpl = async () =>
+    new Response(JSON.stringify({ success: false, errorCode: 'RATE_LIMITED' }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
+    })
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    (error) => {
+      assert.ok(error instanceof RateLimitError)
+      assert.ok(!(error instanceof TransportError), '429 must not look retryable')
+      assert.ok(!(error instanceof ApiError))
+      assert.equal(error.retryAfterSeconds, 30)
+      assert.match(error.message, /retryAfterSeconds/)
+      return true
+    },
+  )
+})
+
+test('a Retry-After the SDK cannot read as seconds leaves retryAfterSeconds null', async () => {
+  // The header is allowed to carry an HTTP date, and a limiter may send nothing at all.
+  const headerValues = [['Retry-After', 'Wed, 20 Aug 2026 14:00:00 GMT'], ['Retry-After', '1.5'], []]
+
+  for (const pair of headerValues) {
+    const headers = { 'Content-Type': 'application/json' }
+    if (pair.length === 2) headers[pair[0]] = pair[1]
+    const fetchImpl = async () => new Response(JSON.stringify({ success: false }), { status: 429, headers })
+
+    await assert.rejects(
+      () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+      (error) => {
+        assert.ok(error instanceof RateLimitError)
+        assert.equal(error.retryAfterSeconds, null, `Retry-After ${pair[1] ?? '(absent)'}`)
+        return true
+      },
+    )
+  }
+})
+
+test('the retry helper does not retry a 429', async () => {
+  let attempts = 0
+  const fetchImpl = async () => {
+    attempts++
+    return new Response(JSON.stringify({ success: false }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': '5' },
+    })
+  }
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, { attempts: 3, baseDelayMs: 1 }),
+    (error) => {
+      assert.ok(error instanceof RateLimitError)
+      assert.equal(error.retryAfterSeconds, 5)
+      return true
+    },
+  )
+  assert.equal(attempts, 1, 'retrying into a limiter that just said stop makes it worse')
+})
+
+test('getStatus surfaces a 429 as a RateLimitError too', async () => {
+  const fetchImpl = async () =>
+    new Response(JSON.stringify({ success: false }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': '12' },
+    })
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).getStatus(CHECKOUT.transactionId),
+    (error) => {
+      assert.ok(error instanceof RateLimitError)
+      assert.equal(error.retryAfterSeconds, 12)
+      return true
+    },
+  )
+})
+
+test('a plaintext baseUrl is refused at construction', () => {
+  const rejected = [
+    'http://api.dominaite.com/payments',
+    'http://dev.example.test/payments',
+    'http://192.168.1.10:8080/payments',
+    'http://localhost.evil.example.test/payments', // not loopback, just spelled like it
+    'ftp://api.dominaite.com/payments',
+    'api.dominaite.com/payments', // no scheme at all
+    '',
+  ]
+
+  for (const baseUrl of rejected) {
+    assert.throws(
+      () => new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl }),
+      TypeError,
+      `baseUrl should be rejected: ${baseUrl}`,
+    )
+  }
+})
+
+test('https and loopback http are accepted', () => {
+  const accepted = [
+    'https://api.dominaite.com/payments',
+    'https://dev.example.test/payments',
+    'http://localhost:5000/payments',
+    'http://127.0.0.1:5000/payments',
+    'http://[::1]:5000/payments',
+  ]
+
+  for (const baseUrl of accepted) {
+    assert.doesNotThrow(
+      () => new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl }),
+      `baseUrl should be accepted: ${baseUrl}`,
+    )
+  }
+})
+
+test('the default baseUrl is https and trailing slashes are still stripped', async () => {
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+  const client = new DominaiteClient({
+    keyId: KEY_ID,
+    secret: VECTOR.secret,
+    baseUrl: `${BASE_URL}///`,
+    fetch: fetchImpl,
+  })
+
+  await client.createCheckoutSession(SESSION_PARAMS)
+  assert.equal(calls[0].url, `${BASE_URL}${DominaiteClient.SESSIONS_PATH}`)
 })

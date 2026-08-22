@@ -4,6 +4,7 @@ export {
   AuthenticationError,
   CheckoutRefusedError,
   DominaiteError,
+  RateLimitError,
   SESSION_REFUSAL_ERROR_CODES,
   TransportError,
   VALIDATION_ERROR_CODES,

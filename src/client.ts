@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto'
 
-import { ApiError, AuthenticationError, CheckoutRefusedError, TransportError } from './errors.js'
+import {
+  ApiError,
+  AuthenticationError,
+  CheckoutRefusedError,
+  RateLimitError,
+  TransportError,
+} from './errors.js'
 import { signRequest } from './signing.js'
 import type {
   CheckoutSession,
@@ -17,6 +23,12 @@ const PING_PATH = '/merchant-api/ping'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
 const SDK_VERSION = '0.1.2'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+/** Hard ceiling on a response body. Past this the read is abandoned, not buffered. */
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+/** Maximum length of the fields the API caps at 100, counted in Unicode code points. */
+const MAX_FIELD_CODE_POINTS = 100
+/** Hosts allowed to be reached over plain http, for local development only. */
+const PLAINTEXT_ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 
 /**
  * Server-side client for the Dominaite merchant API.
@@ -59,7 +71,7 @@ export class DominaiteClient {
 
     this.#keyId = options.keyId
     this.#secret = options.secret
-    this.#baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '')
+    this.#baseUrl = normalizeBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL)
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
     const fetchImpl = options.fetch ?? globalThis.fetch
@@ -89,7 +101,8 @@ export class DominaiteClient {
    *
    * Throws AuthenticationError (wrong credentials, bad signature, clock off, IP not
    * allowlisted - fix config, do not retry), CheckoutRefusedError (the gateway refused;
-   * inspect errorCode), ApiError (unexpected response), or TransportError (network or
+   * inspect errorCode), RateLimitError (429 - wait out retryAfterSeconds, then retry with
+   * the same key), ApiError (unexpected response), or TransportError (network or
    * 5xx - safe to retry WITH the same idempotencyKey).
    */
   async createCheckoutSession(params: CreateCheckoutSessionParams): Promise<CheckoutSession> {
@@ -118,7 +131,9 @@ export class DominaiteClient {
    * idempotency key across attempts - which is what makes the retry safe: the API
    * never opens a second payment for a key it has already seen.
    *
-   * Refusals and authentication failures are not retried; they will not change.
+   * Refusals and authentication failures are not retried; they will not change. Neither
+   * is a 429: retrying into a limiter that just said stop makes it worse, so the
+   * RateLimitError comes straight back with retryAfterSeconds for you to honour.
    *
    * This buys you protection from a double charge, not recovery of the first session. If
    * an earlier attempt did reach the gateway and take the key, the retry comes back as a
@@ -179,7 +194,8 @@ export class DominaiteClient {
    * should make you keep polling, never silently close an order that is still live.
    *
    * Poll after the payer returns to you, or on your order timeout - not in a tight loop;
-   * the endpoint is rate limited per key.
+   * the endpoint is rate limited per key (60/min/key, 120/min/IP) and going over throws
+   * RateLimitError.
    */
   async getStatus(transactionId: string): Promise<CheckoutStatus> {
     const normalized = String(transactionId ?? '').trim().toLowerCase()
@@ -204,10 +220,25 @@ export class DominaiteClient {
       )
     }
 
+    if (typeof params.orderReference !== 'string' || params.orderReference === '') {
+      throw new TypeError('orderReference must be a non-empty string')
+    }
+    if (countCodePoints(params.orderReference) > MAX_FIELD_CODE_POINTS) {
+      throw new TypeError(
+        `orderReference must be at most ${MAX_FIELD_CODE_POINTS} characters`,
+      )
+    }
+
     const { idempotencyKey: providedKey, ...bodyParams } = params
     const idempotencyKey = providedKey ?? randomUUID()
-    if (typeof idempotencyKey !== 'string' || idempotencyKey === '' || idempotencyKey.length > 100) {
-      throw new TypeError('idempotencyKey must be a non-empty string of at most 100 characters')
+    if (
+      typeof idempotencyKey !== 'string' ||
+      idempotencyKey === '' ||
+      countCodePoints(idempotencyKey) > MAX_FIELD_CODE_POINTS
+    ) {
+      throw new TypeError(
+        `idempotencyKey must be a non-empty string of at most ${MAX_FIELD_CODE_POINTS} characters`,
+      )
     }
 
     let body: string
@@ -283,8 +314,11 @@ export class DominaiteClient {
 
     let raw: string
     try {
-      raw = await response.text()
+      raw = await readBoundedText(response)
     } catch (error) {
+      if (error instanceof TransportError) {
+        throw error
+      }
       throw new TransportError(`Could not read the Dominaite API response: ${describe(error)}`)
     }
 
@@ -310,6 +344,19 @@ export class DominaiteClient {
         'Authentication failed - check your key id, secret, and server clock.',
       )
     }
+    if (response.status === 429) {
+      // Deliberately not a TransportError: the retry helper would hammer a limiter that
+      // is already telling us to stop. The caller waits out retryAfterSeconds instead.
+      const retryAfterSeconds = parseRetryAfterSeconds(response.headers?.get('Retry-After'))
+      const wait =
+        retryAfterSeconds === null
+          ? 'Retry with the same idempotency key after backing off.'
+          : `Wait ${retryAfterSeconds}s (retryAfterSeconds), then retry with the same idempotency key.`
+      throw new RateLimitError(
+        `Rate limit exceeded (HTTP 429). ${wait}`,
+        retryAfterSeconds,
+      )
+    }
     if (response.status >= 500) {
       throw new TransportError(
         `The Dominaite API is unavailable (HTTP ${response.status}); retry with the same idempotency key.`,
@@ -328,6 +375,122 @@ export class DominaiteClient {
 
     return payload
   }
+}
+
+/**
+ * Strips trailing slashes and refuses anything that would put a signed request on the
+ * wire in the clear. http:// is allowed only for the loopback names a developer runs a
+ * local gateway on; everywhere else the API key id, timestamp and signature would be
+ * readable by anything on the path, and the reply would be forgeable.
+ */
+function normalizeBaseUrl(baseUrl: string): string {
+  if (typeof baseUrl !== 'string' || baseUrl === '') {
+    throw new TypeError('baseUrl must be a URL string')
+  }
+
+  const trimmed = baseUrl.replace(/\/+$/, '')
+
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new TypeError(`baseUrl must be an absolute URL, got: ${baseUrl}`)
+  }
+
+  if (parsed.protocol === 'https:') {
+    return trimmed
+  }
+  if (parsed.protocol === 'http:' && PLAINTEXT_ALLOWED_HOSTS.has(parsed.hostname)) {
+    return trimmed
+  }
+
+  throw new TypeError(
+    `baseUrl must use https:// (got ${parsed.protocol}//${parsed.host}). ` +
+      'Plain http is accepted only for localhost, 127.0.0.1 and ::1.',
+  )
+}
+
+/**
+ * Reads the body with a hard byte ceiling so a wrong or hostile host on the other end
+ * cannot make the SDK buffer until the process dies. Counts the bytes as they arrive
+ * rather than trusting Content-Length, which the sender controls.
+ */
+async function readBoundedText(response: Response): Promise<string> {
+  const body = response.body as ReadableStream<Uint8Array> | null | undefined
+  if (!body || typeof body.getReader !== 'function') {
+    // A fetch implementation with no readable stream. Nothing to meter incrementally, so
+    // the best available check is the buffer it hands back.
+    const text = await response.text()
+    if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) {
+      throw oversizedBody()
+    }
+    return text
+  }
+
+  const reader = body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let total = 0
+  let text = ''
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) {
+        break
+      }
+      total += value.byteLength
+      if (total > MAX_RESPONSE_BYTES) {
+        throw oversizedBody()
+      }
+      text += decoder.decode(value, { stream: true })
+    }
+  } finally {
+    // Releases the socket whether we finished or bailed out at the ceiling.
+    reader.cancel().catch(() => {})
+  }
+
+  return text + decoder.decode()
+}
+
+function oversizedBody(): TransportError {
+  return new TransportError(
+    `The Dominaite API response exceeded the ${MAX_RESPONSE_BYTES} byte limit and was not read. ` +
+      'Check your baseUrl and any proxy in front of it, then retry with the same idempotency key.',
+  )
+}
+
+/**
+ * Length in Unicode CODE POINTS, which is what the API's own limits count - not UTF-16
+ * units and not bytes. A 100-character Cyrillic order reference is 100 here and 200
+ * bytes, and must not be rejected for it.
+ *
+ * Known caveat: an astral character (emoji, rarer CJK) counts as 1 here while the server
+ * counts it as 2, so a string packed with them can pass this check and still be rejected
+ * upstream. The server is the final arbiter; this check only catches the obvious cases
+ * before they cost a round trip.
+ */
+function countCodePoints(value: string): number {
+  let count = 0
+  for (const _ of value) {
+    count++
+  }
+  return count
+}
+
+/**
+ * Retry-After as whole seconds, or null. The header may also carry an HTTP date; this SDK
+ * does not translate one, and says so on RateLimitError rather than guessing a number.
+ */
+function parseRetryAfterSeconds(value: string | null | undefined): number | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const trimmed = value.trim()
+  if (!/^[0-9]+$/.test(trimmed)) {
+    return null
+  }
+  const seconds = Number(trimmed)
+  return Number.isSafeInteger(seconds) ? seconds : null
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
