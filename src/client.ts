@@ -23,6 +23,8 @@ const PING_PATH = '/merchant-api/ping'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
 const SDK_VERSION = '0.1.2'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+/** Maximum length of the fields the API caps at 100, counted in Unicode code points. */
+const MAX_FIELD_CODE_POINTS = 100
 /** Hosts allowed to be reached over plain http, for local development only. */
 const PLAINTEXT_ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 
@@ -216,10 +218,25 @@ export class DominaiteClient {
       )
     }
 
+    if (typeof params.orderReference !== 'string' || params.orderReference === '') {
+      throw new TypeError('orderReference must be a non-empty string')
+    }
+    if (countCodePoints(params.orderReference) > MAX_FIELD_CODE_POINTS) {
+      throw new TypeError(
+        `orderReference must be at most ${MAX_FIELD_CODE_POINTS} characters`,
+      )
+    }
+
     const { idempotencyKey: providedKey, ...bodyParams } = params
     const idempotencyKey = providedKey ?? randomUUID()
-    if (typeof idempotencyKey !== 'string' || idempotencyKey === '' || idempotencyKey.length > 100) {
-      throw new TypeError('idempotencyKey must be a non-empty string of at most 100 characters')
+    if (
+      typeof idempotencyKey !== 'string' ||
+      idempotencyKey === '' ||
+      countCodePoints(idempotencyKey) > MAX_FIELD_CODE_POINTS
+    ) {
+      throw new TypeError(
+        `idempotencyKey must be a non-empty string of at most ${MAX_FIELD_CODE_POINTS} characters`,
+      )
     }
 
     let body: string
@@ -386,6 +403,24 @@ function normalizeBaseUrl(baseUrl: string): string {
     `baseUrl must use https:// (got ${parsed.protocol}//${parsed.host}). ` +
       'Plain http is accepted only for localhost, 127.0.0.1 and ::1.',
   )
+}
+
+/**
+ * Length in Unicode CODE POINTS, which is what the API's own limits count - not UTF-16
+ * units and not bytes. A 100-character Cyrillic order reference is 100 here and 200
+ * bytes, and must not be rejected for it.
+ *
+ * Known caveat: an astral character (emoji, rarer CJK) counts as 1 here while the server
+ * counts it as 2, so a string packed with them can pass this check and still be rejected
+ * upstream. The server is the final arbiter; this check only catches the obvious cases
+ * before they cost a round trip.
+ */
+function countCodePoints(value: string): number {
+  let count = 0
+  for (const _ of value) {
+    count++
+  }
+  return count
 }
 
 /**

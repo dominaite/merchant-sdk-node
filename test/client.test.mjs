@@ -464,6 +464,52 @@ test('a non-JSON response is an ApiError, not a crash', async () => {
 // A6: a plaintext baseUrl puts X-Api-Key-Id, X-Timestamp and X-Signature on the wire in
 // the clear, and lets anything on the path answer in the API's place.
 
+// A12: the limits are counted in Unicode code points, so non-Latin text is not rejected
+// for being two bytes a character.
+
+test('a 100-character Cyrillic orderReference passes validation', async () => {
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+  const orderReference = 'зака'.repeat(25) // 100 characters, 200 bytes in UTF-8
+
+  assert.equal([...orderReference].length, 100)
+  assert.equal(Buffer.byteLength(orderReference, 'utf8'), 200)
+
+  await makeClient(fetchImpl).createCheckoutSession({ ...SESSION_PARAMS, orderReference })
+  assert.equal(calls.length, 1, 'a 100-code-point reference must reach the network')
+})
+
+test('a 100-code-point idempotency key passes, and 101 does not', async () => {
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+  const client = makeClient(fetchImpl)
+
+  await client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey: 'ключ'.repeat(25) })
+  assert.equal(calls.length, 1)
+
+  await assert.rejects(
+    () => client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey: `${'ключ'.repeat(25)}я` }),
+    TypeError,
+  )
+  await assert.rejects(
+    () => client.createCheckoutSession({ ...SESSION_PARAMS, orderReference: 'з'.repeat(101) }),
+    TypeError,
+  )
+  assert.equal(calls.length, 1, 'over-length fields must never reach the network')
+})
+
+test('orderReference must be a non-empty string', async () => {
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+  const client = makeClient(fetchImpl)
+
+  for (const orderReference of ['', 1042, {}]) {
+    await assert.rejects(
+      () => client.createCheckoutSession({ ...SESSION_PARAMS, orderReference }),
+      TypeError,
+      `orderReference ${String(orderReference)} should be rejected`,
+    )
+  }
+  assert.equal(calls.length, 0)
+})
+
 // A11: 429 is its own error, and never an automatic retry.
 
 test('a 429 is a RateLimitError carrying an integer Retry-After', async () => {
