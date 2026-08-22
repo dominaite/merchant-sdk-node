@@ -91,6 +91,10 @@ console.log(await client.ping())
 Keep an eye on `clockSkewSeconds`: the gateway rejects requests once it passes 300, so a
 number that keeps growing is your cue to fix NTP before payments start failing.
 
+`baseUrl` has to be `https://`. The only exception is a local gateway on `localhost`,
+`127.0.0.1` or `::1`; anything else over plain http would put your key id, timestamp and
+signature on the wire in the clear, so the constructor throws a `TypeError` instead.
+
 `create-session.mjs`:
 
 ```js

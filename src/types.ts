@@ -110,7 +110,13 @@ export interface DominaiteClientOptions {
   keyId: string
   /** Your API secret (dms_...). Server-side only. */
   secret: string
-  /** Override for non-production environments. Defaults to the production API. */
+  /**
+   * Override for non-production environments. Defaults to the production API.
+   *
+   * Must be https://. Plain http is accepted only for localhost, 127.0.0.1 and ::1,
+   * so a local gateway still works while a staging host cannot end up sending your
+   * signed headers in the clear.
+   */
   baseUrl?: string
   /** Per-request timeout. Defaults to 15000. */
   timeoutMs?: number

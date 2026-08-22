@@ -17,6 +17,8 @@ const PING_PATH = '/merchant-api/ping'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
 const SDK_VERSION = '0.1.2'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+/** Hosts allowed to be reached over plain http, for local development only. */
+const PLAINTEXT_ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 
 /**
  * Server-side client for the Dominaite merchant API.
@@ -59,7 +61,7 @@ export class DominaiteClient {
 
     this.#keyId = options.keyId
     this.#secret = options.secret
-    this.#baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '')
+    this.#baseUrl = normalizeBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL)
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
     const fetchImpl = options.fetch ?? globalThis.fetch
@@ -328,6 +330,39 @@ export class DominaiteClient {
 
     return payload
   }
+}
+
+/**
+ * Strips trailing slashes and refuses anything that would put a signed request on the
+ * wire in the clear. http:// is allowed only for the loopback names a developer runs a
+ * local gateway on; everywhere else the API key id, timestamp and signature would be
+ * readable by anything on the path, and the reply would be forgeable.
+ */
+function normalizeBaseUrl(baseUrl: string): string {
+  if (typeof baseUrl !== 'string' || baseUrl === '') {
+    throw new TypeError('baseUrl must be a URL string')
+  }
+
+  const trimmed = baseUrl.replace(/\/+$/, '')
+
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new TypeError(`baseUrl must be an absolute URL, got: ${baseUrl}`)
+  }
+
+  if (parsed.protocol === 'https:') {
+    return trimmed
+  }
+  if (parsed.protocol === 'http:' && PLAINTEXT_ALLOWED_HOSTS.has(parsed.hostname)) {
+    return trimmed
+  }
+
+  throw new TypeError(
+    `baseUrl must use https:// (got ${parsed.protocol}//${parsed.host}). ` +
+      'Plain http is accepted only for localhost, 127.0.0.1 and ::1.',
+  )
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

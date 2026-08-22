@@ -459,3 +459,56 @@ test('a non-JSON response is an ApiError, not a crash', async () => {
   const fetchImpl = async () => new Response('<html>502 Bad Gateway</html>', { status: 200 })
   await assert.rejects(() => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS), ApiError)
 })
+
+// A6: a plaintext baseUrl puts X-Api-Key-Id, X-Timestamp and X-Signature on the wire in
+// the clear, and lets anything on the path answer in the API's place.
+
+test('a plaintext baseUrl is refused at construction', () => {
+  const rejected = [
+    'http://api.dominaite.com/payments',
+    'http://dev.example.test/payments',
+    'http://192.168.1.10:8080/payments',
+    'http://localhost.evil.example.test/payments', // not loopback, just spelled like it
+    'ftp://api.dominaite.com/payments',
+    'api.dominaite.com/payments', // no scheme at all
+    '',
+  ]
+
+  for (const baseUrl of rejected) {
+    assert.throws(
+      () => new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl }),
+      TypeError,
+      `baseUrl should be rejected: ${baseUrl}`,
+    )
+  }
+})
+
+test('https and loopback http are accepted', () => {
+  const accepted = [
+    'https://api.dominaite.com/payments',
+    'https://dev.example.test/payments',
+    'http://localhost:5000/payments',
+    'http://127.0.0.1:5000/payments',
+    'http://[::1]:5000/payments',
+  ]
+
+  for (const baseUrl of accepted) {
+    assert.doesNotThrow(
+      () => new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl }),
+      `baseUrl should be accepted: ${baseUrl}`,
+    )
+  }
+})
+
+test('the default baseUrl is https and trailing slashes are still stripped', async () => {
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+  const client = new DominaiteClient({
+    keyId: KEY_ID,
+    secret: VECTOR.secret,
+    baseUrl: `${BASE_URL}///`,
+    fetch: fetchImpl,
+  })
+
+  await client.createCheckoutSession(SESSION_PARAMS)
+  assert.equal(calls[0].url, `${BASE_URL}${DominaiteClient.SESSIONS_PATH}`)
+})
