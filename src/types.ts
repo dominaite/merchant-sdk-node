@@ -118,7 +118,7 @@ export interface DominaiteClientOptions {
    * signed headers in the clear.
    */
   baseUrl?: string
-  /** Per-request timeout. Defaults to 15000. */
+  /** Per-request timeout in milliseconds. Defaults to 45000. */
   timeoutMs?: number
   /** Injectable fetch, for tests or a proxy-aware implementation. Defaults to global fetch. */
   fetch?: typeof globalThis.fetch
