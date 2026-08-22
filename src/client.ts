@@ -23,6 +23,8 @@ const PING_PATH = '/merchant-api/ping'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
 const SDK_VERSION = '0.1.2'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+/** Hard ceiling on a response body. Past this the read is abandoned, not buffered. */
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 /** Maximum length of the fields the API caps at 100, counted in Unicode code points. */
 const MAX_FIELD_CODE_POINTS = 100
 /** Hosts allowed to be reached over plain http, for local development only. */
@@ -312,8 +314,11 @@ export class DominaiteClient {
 
     let raw: string
     try {
-      raw = await response.text()
+      raw = await readBoundedText(response)
     } catch (error) {
+      if (error instanceof TransportError) {
+        throw error
+      }
       throw new TransportError(`Could not read the Dominaite API response: ${describe(error)}`)
     }
 
@@ -402,6 +407,55 @@ function normalizeBaseUrl(baseUrl: string): string {
   throw new TypeError(
     `baseUrl must use https:// (got ${parsed.protocol}//${parsed.host}). ` +
       'Plain http is accepted only for localhost, 127.0.0.1 and ::1.',
+  )
+}
+
+/**
+ * Reads the body with a hard byte ceiling so a wrong or hostile host on the other end
+ * cannot make the SDK buffer until the process dies. Counts the bytes as they arrive
+ * rather than trusting Content-Length, which the sender controls.
+ */
+async function readBoundedText(response: Response): Promise<string> {
+  const body = response.body as ReadableStream<Uint8Array> | null | undefined
+  if (!body || typeof body.getReader !== 'function') {
+    // A fetch implementation with no readable stream. Nothing to meter incrementally, so
+    // the best available check is the buffer it hands back.
+    const text = await response.text()
+    if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) {
+      throw oversizedBody()
+    }
+    return text
+  }
+
+  const reader = body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let total = 0
+  let text = ''
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) {
+        break
+      }
+      total += value.byteLength
+      if (total > MAX_RESPONSE_BYTES) {
+        throw oversizedBody()
+      }
+      text += decoder.decode(value, { stream: true })
+    }
+  } finally {
+    // Releases the socket whether we finished or bailed out at the ceiling.
+    reader.cancel().catch(() => {})
+  }
+
+  return text + decoder.decode()
+}
+
+function oversizedBody(): TransportError {
+  return new TransportError(
+    `The Dominaite API response exceeded the ${MAX_RESPONSE_BYTES} byte limit and was not read. ` +
+      'Check your baseUrl and any proxy in front of it, then retry with the same idempotency key.',
   )
 }
 

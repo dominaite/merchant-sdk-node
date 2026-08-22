@@ -464,6 +464,66 @@ test('a non-JSON response is an ApiError, not a crash', async () => {
 // A6: a plaintext baseUrl puts X-Api-Key-Id, X-Timestamp and X-Signature on the wire in
 // the clear, and lets anything on the path answer in the API's place.
 
+// A13: a body read has a ceiling, so a wrong host cannot make the SDK buffer until the
+// process dies.
+
+test('an oversized response body is a TransportError, and the read stops at the cap', async () => {
+  const chunk = new Uint8Array(1024 * 1024).fill(0x20) // 1MB of spaces
+  let chunksPulled = 0
+
+  const fetchImpl = async () =>
+    new Response(
+      new ReadableStream({
+        pull(controller) {
+          chunksPulled++
+          controller.enqueue(chunk.slice())
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    (error) => {
+      assert.ok(error instanceof TransportError, 'an oversized body is the retryable class')
+      assert.match(error.message, /exceeded/)
+      return true
+    },
+  )
+
+  // The cap is 10MB. Without one this stream never ends, so finishing at all is the
+  // result; the bound proves it stopped there rather than somewhere far past it.
+  assert.ok(chunksPulled <= 16, `read ${chunksPulled} MB before stopping`)
+})
+
+test('a large body under the cap is still read, across chunk boundaries', async () => {
+  const status = {
+    transactionId: CHECKOUT.transactionId,
+    status: 'succeeded',
+    amount: 2500,
+    currency: 'EUR',
+    // Multi-byte text, sized so the UTF-8 encoding lands mid-character on a chunk split.
+    note: 'зака'.repeat(50_000),
+  }
+  const encoded = new TextEncoder().encode(JSON.stringify(status))
+
+  const fetchImpl = async () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          for (let offset = 0; offset < encoded.length; offset += 4093) {
+            controller.enqueue(encoded.slice(offset, offset + 4093))
+          }
+          controller.close()
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )
+
+  const result = await makeClient(fetchImpl).getStatus(CHECKOUT.transactionId)
+  assert.deepEqual(result, status)
+})
+
 // A12: the limits are counted in Unicode code points, so non-Latin text is not rejected
 // for being two bytes a character.
 
