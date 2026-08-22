@@ -6,6 +6,7 @@ import {
   AuthenticationError,
   CheckoutRefusedError,
   DominaiteClient,
+  RateLimitError,
   TransportError,
   signRequest,
 } from '../dist/esm/index.js'
@@ -462,6 +463,86 @@ test('a non-JSON response is an ApiError, not a crash', async () => {
 
 // A6: a plaintext baseUrl puts X-Api-Key-Id, X-Timestamp and X-Signature on the wire in
 // the clear, and lets anything on the path answer in the API's place.
+
+// A11: 429 is its own error, and never an automatic retry.
+
+test('a 429 is a RateLimitError carrying an integer Retry-After', async () => {
+  const fetchImpl = async () =>
+    new Response(JSON.stringify({ success: false, errorCode: 'RATE_LIMITED' }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
+    })
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    (error) => {
+      assert.ok(error instanceof RateLimitError)
+      assert.ok(!(error instanceof TransportError), '429 must not look retryable')
+      assert.ok(!(error instanceof ApiError))
+      assert.equal(error.retryAfterSeconds, 30)
+      assert.match(error.message, /retryAfterSeconds/)
+      return true
+    },
+  )
+})
+
+test('a Retry-After the SDK cannot read as seconds leaves retryAfterSeconds null', async () => {
+  // The header is allowed to carry an HTTP date, and a limiter may send nothing at all.
+  const headerValues = [['Retry-After', 'Wed, 20 Aug 2026 14:00:00 GMT'], ['Retry-After', '1.5'], []]
+
+  for (const pair of headerValues) {
+    const headers = { 'Content-Type': 'application/json' }
+    if (pair.length === 2) headers[pair[0]] = pair[1]
+    const fetchImpl = async () => new Response(JSON.stringify({ success: false }), { status: 429, headers })
+
+    await assert.rejects(
+      () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+      (error) => {
+        assert.ok(error instanceof RateLimitError)
+        assert.equal(error.retryAfterSeconds, null, `Retry-After ${pair[1] ?? '(absent)'}`)
+        return true
+      },
+    )
+  }
+})
+
+test('the retry helper does not retry a 429', async () => {
+  let attempts = 0
+  const fetchImpl = async () => {
+    attempts++
+    return new Response(JSON.stringify({ success: false }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': '5' },
+    })
+  }
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, { attempts: 3, baseDelayMs: 1 }),
+    (error) => {
+      assert.ok(error instanceof RateLimitError)
+      assert.equal(error.retryAfterSeconds, 5)
+      return true
+    },
+  )
+  assert.equal(attempts, 1, 'retrying into a limiter that just said stop makes it worse')
+})
+
+test('getStatus surfaces a 429 as a RateLimitError too', async () => {
+  const fetchImpl = async () =>
+    new Response(JSON.stringify({ success: false }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': '12' },
+    })
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).getStatus(CHECKOUT.transactionId),
+    (error) => {
+      assert.ok(error instanceof RateLimitError)
+      assert.equal(error.retryAfterSeconds, 12)
+      return true
+    },
+  )
+})
 
 test('a plaintext baseUrl is refused at construction', () => {
   const rejected = [

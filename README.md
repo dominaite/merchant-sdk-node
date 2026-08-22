@@ -361,7 +361,8 @@ Treat any status you do not recognise as still-open as well: a value the API add
 make you keep polling, never silently close an order that is still live.
 
 Poll after the payer returns to you, or on your order timeout - not in a tight loop; the endpoint
-is rate limited per key.
+is rate limited per key. The platform allows 60 requests a minute per API key and 120 a minute per
+IP; going over throws `RateLimitError`, which carries `retryAfterSeconds`.
 
 ## Errors
 
@@ -371,6 +372,7 @@ Everything thrown by the SDK extends `DominaiteError`.
 |---|---|---|
 | `CheckoutRefusedError` | The API answered, `success: false`. `errorCode` carries the reason. | Branch on `errorCode`. Do not blind-retry. |
 | `AuthenticationError` | 401/403. `errorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
+| `RateLimitError` | 429. You went over 60 requests/min for the key or 120/min for the IP. `retryAfterSeconds` carries `Retry-After` when it was a whole number of seconds, else `null`. | Wait `retryAfterSeconds` (or your own backoff), then send it again with the **same** idempotency key. The SDK does not retry this for you. |
 | `TransportError` | Network failure, timeout, or 5xx (`MERCHANT_API_UNAVAILABLE`). | Retry with the **same** idempotency key, and expect a replay refusal if the first attempt did land. |
 | `ApiError` | Any other rejecting or unexpected response; `httpStatus` carries the code. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. |
 | `ApiError` with a 3xx `httpStatus` | The host you called answered with a redirect. | The Dominaite API never redirects, so the SDK refuses to follow one: your signed headers would be handed to whatever `Location` names, and its answer would look authentic. Check `baseUrl` and any proxy in front of it. |

@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto'
 
-import { ApiError, AuthenticationError, CheckoutRefusedError, TransportError } from './errors.js'
+import {
+  ApiError,
+  AuthenticationError,
+  CheckoutRefusedError,
+  RateLimitError,
+  TransportError,
+} from './errors.js'
 import { signRequest } from './signing.js'
 import type {
   CheckoutSession,
@@ -91,7 +97,8 @@ export class DominaiteClient {
    *
    * Throws AuthenticationError (wrong credentials, bad signature, clock off, IP not
    * allowlisted - fix config, do not retry), CheckoutRefusedError (the gateway refused;
-   * inspect errorCode), ApiError (unexpected response), or TransportError (network or
+   * inspect errorCode), RateLimitError (429 - wait out retryAfterSeconds, then retry with
+   * the same key), ApiError (unexpected response), or TransportError (network or
    * 5xx - safe to retry WITH the same idempotencyKey).
    */
   async createCheckoutSession(params: CreateCheckoutSessionParams): Promise<CheckoutSession> {
@@ -120,7 +127,9 @@ export class DominaiteClient {
    * idempotency key across attempts - which is what makes the retry safe: the API
    * never opens a second payment for a key it has already seen.
    *
-   * Refusals and authentication failures are not retried; they will not change.
+   * Refusals and authentication failures are not retried; they will not change. Neither
+   * is a 429: retrying into a limiter that just said stop makes it worse, so the
+   * RateLimitError comes straight back with retryAfterSeconds for you to honour.
    *
    * This buys you protection from a double charge, not recovery of the first session. If
    * an earlier attempt did reach the gateway and take the key, the retry comes back as a
@@ -181,7 +190,8 @@ export class DominaiteClient {
    * should make you keep polling, never silently close an order that is still live.
    *
    * Poll after the payer returns to you, or on your order timeout - not in a tight loop;
-   * the endpoint is rate limited per key.
+   * the endpoint is rate limited per key (60/min/key, 120/min/IP) and going over throws
+   * RateLimitError.
    */
   async getStatus(transactionId: string): Promise<CheckoutStatus> {
     const normalized = String(transactionId ?? '').trim().toLowerCase()
@@ -312,6 +322,19 @@ export class DominaiteClient {
         'Authentication failed - check your key id, secret, and server clock.',
       )
     }
+    if (response.status === 429) {
+      // Deliberately not a TransportError: the retry helper would hammer a limiter that
+      // is already telling us to stop. The caller waits out retryAfterSeconds instead.
+      const retryAfterSeconds = parseRetryAfterSeconds(response.headers?.get('Retry-After'))
+      const wait =
+        retryAfterSeconds === null
+          ? 'Retry with the same idempotency key after backing off.'
+          : `Wait ${retryAfterSeconds}s (retryAfterSeconds), then retry with the same idempotency key.`
+      throw new RateLimitError(
+        `Rate limit exceeded (HTTP 429). ${wait}`,
+        retryAfterSeconds,
+      )
+    }
     if (response.status >= 500) {
       throw new TransportError(
         `The Dominaite API is unavailable (HTTP ${response.status}); retry with the same idempotency key.`,
@@ -363,6 +386,22 @@ function normalizeBaseUrl(baseUrl: string): string {
     `baseUrl must use https:// (got ${parsed.protocol}//${parsed.host}). ` +
       'Plain http is accepted only for localhost, 127.0.0.1 and ::1.',
   )
+}
+
+/**
+ * Retry-After as whole seconds, or null. The header may also carry an HTTP date; this SDK
+ * does not translate one, and says so on RateLimitError rather than guessing a number.
+ */
+function parseRetryAfterSeconds(value: string | null | undefined): number | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const trimmed = value.trim()
+  if (!/^[0-9]+$/.test(trimmed)) {
+    return null
+  }
+  const seconds = Number(trimmed)
+  return Number.isSafeInteger(seconds) ? seconds : null
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
