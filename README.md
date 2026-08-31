@@ -231,7 +231,9 @@ payment you can pay, mint a new session under a **fresh** idempotency key.
 
 ## Sessions expire
 
-A session is valid for 2 hours. If the payer comes back later, create a new session.
+A session is valid for 2 hours. If the payer comes back later, create a new session - and from a
+few minutes past `expiresAt` you can re-POST the **same** idempotency key to get one, so keep the
+order-derived key for the life of the order (see "Recovering from a replay refusal").
 
 ## Webhooks
 
@@ -381,7 +383,8 @@ Everything thrown by the SDK extends `DominaiteError`.
 Refusal codes on `CheckoutRefusedError.errorCode`:
 
 - `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later.
-- `DUPLICATE_REQUEST` - a session for this idempotency key is already open.
+- `DUPLICATE_REQUEST` - a session for this idempotency key is open, or expired within the last
+  few minutes; re-POST the same key shortly, never a fresh one.
 - `ALREADY_PROCESSED` - this idempotency key's payment already completed.
 - `PRIOR_ATTEMPT_FAILED` - a prior attempt with this key failed terminally; use a fresh key.
 - `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
@@ -409,6 +412,13 @@ full refusal payload is on `error.result`.
 What you get back is the status of the earlier payment, not the earlier session: no refusal
 carries `cashierKey` or `cashierToken`, so there is no way to re-render the widget for a session
 you lost. Reconcile against the status, and start a fresh key when you need a payable session.
+
+One replay is not a refusal at all. A session that expired unpaid is superseded: from a few
+minutes past `expiresAt`, re-POSTing the same key returns an ordinary success with a fresh session
+(new `transactionId`, same key), so a customer who comes back late just pays. Keep the
+order-derived key for the life of the order to keep that path open. The band is not endless - once
+the platform has independently closed the attempt (about an hour past expiry), the replay answers
+`PRIOR_ATTEMPT_FAILED` and the key is spent; reconcile and use a fresh key.
 
 ## Verifying your signing
 
