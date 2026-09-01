@@ -699,3 +699,15 @@ test('the default baseUrl is https and trailing slashes are still stripped', asy
   await client.createCheckoutSession(SESSION_PARAMS)
   assert.equal(calls[0].url, `${BASE_URL}${DominaiteClient.SESSIONS_PATH}`)
 })
+
+test('the User-Agent version tracks package.json', async () => {
+  const { readFileSync } = await import('node:fs')
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const { fetchImpl, calls } = recordingFetch({ body: { pong: true, merchantId: 'm', clockSkewSeconds: 0 } })
+  await makeClient(fetchImpl).ping()
+  const ua = calls[0].init.headers['User-Agent']
+  assert.ok(
+    ua.startsWith(`dominaite-node/${pkg.version} `),
+    `User-Agent "${ua}" must carry package.json's version ${pkg.version} - keep SDK_VERSION in client.ts in sync`,
+  )
+})

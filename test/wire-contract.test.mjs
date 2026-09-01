@@ -7,6 +7,7 @@ import {
   SESSION_REFUSAL_ERROR_CODES,
   TRANSACTION_STATUSES,
   VALIDATION_ERROR_CODES,
+  WALLET_TYPES,
 } from '../dist/esm/index.js'
 
 // merchant-api-wire-contract.json is the machine-relevant projection of the gateway's
@@ -39,4 +40,16 @@ test('the validation codes are exactly the HTTP 400 idempotency codes', () => {
 
 test('the contract still lists this SDK', () => {
   assert.ok(WIRE.sdks.includes('node'))
+})
+
+test('the wallet types are exactly the gateway contract, in order', () => {
+  assert.deepEqual([...WALLET_TYPES], WIRE.wallets.walletTypes)
+})
+
+test('the wallet reporting fields are paymentMethod and walletType, both optional', () => {
+  assert.deepEqual(
+    WIRE.wallets.reportingFields.map((field) => field.path),
+    ['paymentMethod', 'walletType'],
+  )
+  assert.ok(WIRE.wallets.reportingFields.every((field) => field.required === false))
 })

@@ -21,7 +21,8 @@ const DEFAULT_BASE_URL = 'https://api.dominaite.com/payments'
 const SESSIONS_PATH = '/merchant-api/checkout/sessions'
 const PING_PATH = '/merchant-api/ping'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
-const SDK_VERSION = '0.1.2'
+// Must track package.json's version - pinned by the version test in client.test.mjs.
+const SDK_VERSION = '0.3.0'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** Hard ceiling on a response body. Past this the read is abandoned, not buffered. */
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024

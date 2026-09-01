@@ -72,6 +72,25 @@ export const TRANSACTION_STATUSES = [
 
 export type TransactionStatus = (typeof TRANSACTION_STATUSES)[number]
 
+/**
+ * Every payment method category the merchant API reports, in the gateway's own order.
+ *
+ * Reporting data, not a money-flow switch: a wallet payment refunds, captures and
+ * disputes exactly like a plain card payment.
+ */
+export const PAYMENT_METHOD_CATEGORIES = ['card', 'wallet', 'bank_transfer', 'sepa'] as const
+
+export type PaymentMethodCategory = (typeof PAYMENT_METHOD_CATEGORIES)[number]
+
+/**
+ * The wallets the gateway currently names in walletType, pinned against the published
+ * contract fixture. The field can carry a lower-cased identifier not in this list yet -
+ * treat unknown values as a valid wallet, not an error.
+ */
+export const WALLET_TYPES = ['apple_pay', 'google_pay', 'samsung_pay'] as const
+
+export type WalletType = (typeof WALLET_TYPES)[number]
+
 /** What {@link DominaiteClient.getStatus} returns. */
 export interface CheckoutStatus {
   transactionId: string
@@ -82,6 +101,18 @@ export interface CheckoutStatus {
   amount: number
   currency: string
   refundedAmount?: number
+  /**
+   * How the payer paid. Null while the payment is still open (no method chosen yet)
+   * and on transactions older than the field. Also inside data on every payment.*
+   * webhook event.
+   */
+  paymentMethod?: PaymentMethodCategory | (string & {}) | null
+  /**
+   * Which wallet, when paymentMethod is 'wallet'. Values outside {@link WALLET_TYPES}
+   * are valid wallets the gateway learned about after this SDK released. Null for
+   * non-wallet payments. Also inside data on every payment.* webhook event.
+   */
+  walletType?: WalletType | (string & {}) | null
   createdAt: string
   updatedAt?: string
   /** Present while the session is still payable. */
