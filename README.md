@@ -256,6 +256,9 @@ The body is flat JSON, with no `success` wrapper to branch on:
   "createdAt": "2026-08-20T14:00:00Z",
   "data": {
     "transactionId": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+    "orderReference": "order-123",
+    "orderId": "dom_0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "description": "Pro plan",
     "status": "succeeded",
     "previousStatus": "pending",
     "kind": "sale",
@@ -263,6 +266,10 @@ The body is flat JSON, with no `success` wrapper to branch on:
     "grossAmount": 8701,
     "surchargeAmount": 261,
     "currency": "EUR",
+    "paymentMethod": "card",
+    "walletType": null,
+    "paymentMethodBrand": "visa",
+    "paymentMethodLast4": "4242",
     "originalTransactionId": null,
     "idempotencyKey": "order-123"
   }
@@ -271,6 +278,13 @@ The body is flat JSON, with no `success` wrapper to branch on:
 
 Amounts are minor units. On `payment.*` the `amount` is what you are paid and `grossAmount` is the
 card movement; on `payment.refunded` the `amount` is what went back to the customer.
+
+`orderReference` is your own order id from create session and the field to match deliveries on;
+it is null only for payments that did not start through the API, and `payment.refunded` carries
+the original payment's value. `orderId` is the hosted checkout id, null on refunds. `description`
+is what you sent on create session, null on refunds. `paymentMethodBrand` and `paymentMethodLast4`
+are filled once a card payment was attempted and null otherwise. Every key is always present;
+ignore keys you do not know, more may be added.
 
 ### Verify first, parse second
 
