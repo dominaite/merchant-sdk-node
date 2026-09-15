@@ -9,20 +9,30 @@ import {
 } from './errors.js'
 import { signRequest } from './signing.js'
 import type {
+  ChargePaymentMethodParams,
   CheckoutSession,
   CheckoutStatus,
   CreateCheckoutSessionParams,
   DominaiteClientOptions,
+  PaymentMethodCharge,
   Ping,
   RetryOptions,
 } from './types.js'
 
 const DEFAULT_BASE_URL = 'https://api.dominaite.com/payments'
 const SESSIONS_PATH = '/merchant-api/checkout/sessions'
+const PAYMENT_METHODS_PATH = '/merchant-api/payment-methods'
 const PING_PATH = '/merchant-api/ping'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
-const SDK_VERSION = '0.1.2'
+const SDK_VERSION = '0.3.0'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+/**
+ * A payment method id is opaque (pm_...), so this only pins what keeps it a single path
+ * segment: no slash, no query, no whitespace, nothing that needs percent-encoding. The
+ * id goes into the signed canonical path verbatim, so anything else would sign one
+ * path and request another.
+ */
+const PAYMENT_METHOD_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/
 /** Hard ceiling on a response body. Past this the read is abandoned, not buffered. */
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 /** Maximum length of the fields the API caps at 100, counted in Unicode code points. */
@@ -53,6 +63,7 @@ const PLAINTEXT_ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
  */
 export class DominaiteClient {
   static readonly SESSIONS_PATH = SESSIONS_PATH
+  static readonly PAYMENT_METHODS_PATH = PAYMENT_METHODS_PATH
   static readonly PING_PATH = PING_PATH
 
   readonly #keyId: string
@@ -208,54 +219,86 @@ export class DominaiteClient {
     return response as CheckoutStatus
   }
 
+  /**
+   * Charges a card kept on file, off-session: no widget, no payer present.
+   *
+   * paymentMethodId is the id from getStatus().paymentMethod of a session you created
+   * with saveCard. The charge is signed like a session and carries an Idempotency-Key
+   * (auto-generated unless you pass one), so retrying after a timeout WITH THE SAME
+   * KEY never charges the card twice.
+   *
+   * A decline is not an exception: the returned charge has status 'failed' plus a
+   * declineClass telling you whether to give up on the card (hard), wait (soft_funds,
+   * soft_other) or bring the customer back for a hosted session (soft_sca_required).
+   * 'pending' is not terminal - poll getStatus(charge.transactionId).
+   *
+   * Throws AuthenticationError, CheckoutRefusedError (the gateway refused to attempt
+   * the charge at all: replayed key, payments off, method not chargeable - inspect
+   * errorCode), RateLimitError, ApiError (404 for an id that is not yours, 4xx
+   * validation), or TransportError (network or 5xx - safe to retry with the same key).
+   */
+  async chargePaymentMethod(
+    paymentMethodId: string,
+    params: ChargePaymentMethodParams,
+  ): Promise<PaymentMethodCharge> {
+    const id = normalizePaymentMethodId(paymentMethodId)
+    const { idempotencyKey, body } = this.#prepareChargeRequest(params)
+    const response = await this.#request('POST', `${PAYMENT_METHODS_PATH}/${id}/charges`, body, idempotencyKey)
+
+    if (response['success'] === false || typeof response['chargeId'] !== 'string') {
+      throw new CheckoutRefusedError(
+        typeof response['errorCode'] === 'string' ? response['errorCode'] : 'UNKNOWN',
+        typeof response['errorMessage'] === 'string'
+          ? response['errorMessage']
+          : 'The charge was refused.',
+        typeof response['transactionId'] === 'string' ? response['transactionId'] : undefined,
+        response,
+      )
+    }
+
+    return response as PaymentMethodCharge
+  }
+
+  /**
+   * Revokes a card kept on file. The token is dropped at the payment provider and the
+   * method's status becomes 'revoked'; a later chargePaymentMethod() on it is refused.
+   * Resolves with nothing on success (HTTP 204). An id that is not yours throws an
+   * ApiError with httpStatus 404. Not a payment operation: no idempotency key is signed.
+   */
+  async revokePaymentMethod(paymentMethodId: string): Promise<void> {
+    const id = normalizePaymentMethodId(paymentMethodId)
+    // DELETE signs an EMPTY idempotency key and an EMPTY body, like GET.
+    await this.#request('DELETE', `${PAYMENT_METHODS_PATH}/${id}`, null, '')
+  }
+
   #prepareSessionRequest(params: CreateCheckoutSessionParams): { idempotencyKey: string; body: string } {
-    for (const required of ['amount', 'currency', 'orderReference'] as const) {
-      if (params?.[required] === undefined || params[required] === null) {
-        throw new TypeError(`Missing required parameter: ${required}`)
-      }
-    }
-    if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
-      throw new TypeError(
-        'amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)',
-      )
-    }
-
-    if (typeof params.orderReference !== 'string' || params.orderReference === '') {
-      throw new TypeError('orderReference must be a non-empty string')
-    }
-    if (countCodePoints(params.orderReference) > MAX_FIELD_CODE_POINTS) {
-      throw new TypeError(
-        `orderReference must be at most ${MAX_FIELD_CODE_POINTS} characters`,
-      )
-    }
-
+    validateMoneyParams(params)
     const { idempotencyKey: providedKey, ...bodyParams } = params
-    const idempotencyKey = providedKey ?? randomUUID()
-    if (
-      typeof idempotencyKey !== 'string' ||
-      idempotencyKey === '' ||
-      countCodePoints(idempotencyKey) > MAX_FIELD_CODE_POINTS
-    ) {
-      throw new TypeError(
-        `idempotencyKey must be a non-empty string of at most ${MAX_FIELD_CODE_POINTS} characters`,
-      )
+    return { idempotencyKey: normalizeIdempotencyKey(providedKey), body: encodeBody(bodyParams) }
+  }
+
+  #prepareChargeRequest(params: ChargePaymentMethodParams): { idempotencyKey: string; body: string } {
+    validateMoneyParams(params)
+    if (params.description !== undefined && typeof params.description !== 'string') {
+      throw new TypeError('description must be a string')
     }
 
-    let body: string
-    try {
-      body = JSON.stringify(bodyParams)
-    } catch {
-      throw new TypeError('Request parameters are not JSON-encodable')
+    // Built field by field, not spread: the body is what gets signed, and the contract
+    // for this route is exactly these fields in this order.
+    const bodyParams: Record<string, unknown> = {
+      amount: params.amount,
+      currency: params.currency,
+      orderReference: params.orderReference,
     }
-    if (typeof body !== 'string') {
-      throw new TypeError('Request parameters are not JSON-encodable')
+    if (params.description !== undefined) {
+      bodyParams['description'] = params.description
     }
 
-    return { idempotencyKey, body }
+    return { idempotencyKey: normalizeIdempotencyKey(params.idempotencyKey), body: encodeBody(bodyParams) }
   }
 
   async #request(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'DELETE',
     path: string,
     body: string | null,
     idempotencyKey: string,
@@ -310,6 +353,11 @@ export class DominaiteClient {
         `Unexpected redirect response (${status}); the Dominaite API never redirects. ` +
           'Check your baseUrl and any proxy in front of it.',
       )
+    }
+
+    // 204 carries nothing to parse; the status is the whole answer.
+    if (response.status === 204) {
+      return {}
     }
 
     let raw: string
@@ -375,6 +423,64 @@ export class DominaiteClient {
 
     return payload
   }
+}
+
+/** The checks shared by every request that moves money: amount, currency, orderReference. */
+function validateMoneyParams(params: { amount: number; currency: string; orderReference: string }): void {
+  for (const required of ['amount', 'currency', 'orderReference'] as const) {
+    if (params?.[required] === undefined || params[required] === null) {
+      throw new TypeError(`Missing required parameter: ${required}`)
+    }
+  }
+  if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
+    throw new TypeError(
+      'amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)',
+    )
+  }
+
+  if (typeof params.orderReference !== 'string' || params.orderReference === '') {
+    throw new TypeError('orderReference must be a non-empty string')
+  }
+  if (countCodePoints(params.orderReference) > MAX_FIELD_CODE_POINTS) {
+    throw new TypeError(
+      `orderReference must be at most ${MAX_FIELD_CODE_POINTS} characters`,
+    )
+  }
+}
+
+function normalizeIdempotencyKey(providedKey: unknown): string {
+  const idempotencyKey = providedKey ?? randomUUID()
+  if (
+    typeof idempotencyKey !== 'string' ||
+    idempotencyKey === '' ||
+    countCodePoints(idempotencyKey) > MAX_FIELD_CODE_POINTS
+  ) {
+    throw new TypeError(
+      `idempotencyKey must be a non-empty string of at most ${MAX_FIELD_CODE_POINTS} characters`,
+    )
+  }
+  return idempotencyKey
+}
+
+function normalizePaymentMethodId(paymentMethodId: unknown): string {
+  const normalized = String(paymentMethodId ?? '').trim()
+  if (!PAYMENT_METHOD_ID_PATTERN.test(normalized)) {
+    throw new TypeError('paymentMethodId must be the id from getStatus().paymentMethod')
+  }
+  return normalized
+}
+
+function encodeBody(bodyParams: Record<string, unknown>): string {
+  let body: string
+  try {
+    body = JSON.stringify(bodyParams)
+  } catch {
+    throw new TypeError('Request parameters are not JSON-encodable')
+  }
+  if (typeof body !== 'string') {
+    throw new TypeError('Request parameters are not JSON-encodable')
+  }
+  return body
 }
 
 /**

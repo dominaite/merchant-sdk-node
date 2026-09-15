@@ -3,7 +3,7 @@ import { createHash, createHmac } from 'node:crypto'
 import { test } from 'node:test'
 
 import { signRequest } from '../dist/esm/index.js'
-import { VECTOR } from './vector.mjs'
+import { CHARGE_VECTOR, REVOKE_VECTOR, VECTOR } from './vector.mjs'
 
 // If these fail, the signing recipe drifted from the gateway and every merchant
 // integration built on this SDK is broken.
@@ -58,4 +58,18 @@ test('GET shape: empty idempotency key and empty body hash the empty string', ()
     expectedEmptyHash,
   ].join('\n')
   assert.equal(signature, createHmac('sha256', VECTOR.secret).update(payload, 'utf8').digest('hex'))
+})
+
+test('charge vector: POST with a body and an Idempotency-Key on the payment-methods path', () => {
+  const hash = createHash('sha256').update(CHARGE_VECTOR.body, 'utf8').digest('hex')
+  assert.equal(hash, CHARGE_VECTOR.bodySha256)
+  assert.equal(signRequest(CHARGE_VECTOR), CHARGE_VECTOR.signature)
+})
+
+test('revoke vector: DELETE signs an empty idempotency key and an empty body', () => {
+  const hash = createHash('sha256').update(REVOKE_VECTOR.body, 'utf8').digest('hex')
+  assert.equal(hash, REVOKE_VECTOR.bodySha256)
+  assert.equal(signRequest(REVOKE_VECTOR), REVOKE_VECTOR.signature)
+  // Same recipe as the session vector: only the method and path moved.
+  assert.notEqual(REVOKE_VECTOR.signature, signRequest({ ...REVOKE_VECTOR, method: 'GET' }))
 })

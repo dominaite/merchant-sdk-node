@@ -5,8 +5,11 @@ import { fileURLToPath } from 'node:url'
 
 import {
   ApiError,
+  CHARGE_STATUSES,
   CheckoutRefusedError,
+  DECLINE_CLASSES,
   DominaiteClient,
+  PAYMENT_METHOD_STATUSES,
   SESSION_REFUSAL_ERROR_CODES,
   TRANSACTION_STATUSES,
   VALIDATION_ERROR_CODES,
@@ -184,8 +187,75 @@ test('getStatus() carries every status in the vocabulary through untouched', asy
   }
 })
 
+test('the stored payment method exposes exactly the contract fields', () => {
+  assert.deepEqual(declaredFields('PaymentMethod'), CONTRACT.endpoints.getStatus.paymentMethodFields)
+  assert.deepEqual([...PAYMENT_METHOD_STATUSES], CONTRACT.paymentMethodStatusVocabulary)
+})
+
+test('the charge exposes exactly the contract fields and vocabularies', () => {
+  assert.deepEqual(declaredFields('PaymentMethodCharge'), CONTRACT.endpoints.chargePaymentMethod.fields)
+  assert.deepEqual([...CHARGE_STATUSES], CONTRACT.chargeStatusVocabulary)
+  assert.deepEqual([...DECLINE_CLASSES], CONTRACT.declineClassVocabulary)
+})
+
+test('getStatus() returns the saved-card example unchanged, payment method included', async () => {
+  const example = CONTRACT.endpoints.getStatus.savedCardExample
+  const { fetchImpl } = recordingFetch(example)
+
+  const status = await makeClient(fetchImpl).getStatus(example.transactionId)
+
+  assert.deepEqual(status, example)
+  assert.deepEqual(status.paymentMethod, example.paymentMethod)
+  assert.ok(PAYMENT_METHOD_STATUSES.includes(status.paymentMethod.status))
+})
+
+test('chargePaymentMethod() returns the contract examples unchanged, declined included', async () => {
+  const { chargePaymentMethod, getStatus } = CONTRACT.endpoints
+  const paymentMethodId = getStatus.savedCardExample.paymentMethod.id
+
+  for (const example of [chargePaymentMethod.successExample, chargePaymentMethod.declinedExample]) {
+    const { fetchImpl, calls } = recordingFetch(example, chargePaymentMethod.httpStatus)
+
+    const charge = await makeClient(fetchImpl).chargePaymentMethod(paymentMethodId, {
+      amount: 8440,
+      currency: 'EUR',
+      orderReference: 'order-1042',
+    })
+
+    assert.deepEqual(charge, example)
+    assert.ok(CHARGE_STATUSES.includes(charge.status))
+    assert.equal(
+      calls[0].url,
+      BASE_URL + chargePaymentMethod.path.replace('{paymentMethodId}', paymentMethodId),
+    )
+    assert.equal(calls[0].init.method, chargePaymentMethod.method)
+    assert.ok(typeof calls[0].init.headers['Idempotency-Key'] === 'string')
+  }
+
+  const declined = chargePaymentMethod.declinedExample
+  assert.ok(DECLINE_CLASSES.includes(declined.declineClass))
+})
+
+test('revokePaymentMethod() resolves on the contract 204 with nothing to parse', async () => {
+  const { revokePaymentMethod, getStatus } = CONTRACT.endpoints
+  const paymentMethodId = getStatus.savedCardExample.paymentMethod.id
+  const calls = []
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init })
+    return new Response(null, { status: revokePaymentMethod.httpStatus })
+  }
+
+  assert.equal(await makeClient(fetchImpl).revokePaymentMethod(paymentMethodId), undefined)
+  assert.equal(
+    calls[0].url,
+    BASE_URL + revokePaymentMethod.path.replace('{paymentMethodId}', paymentMethodId),
+  )
+  assert.equal(calls[0].init.method, revokePaymentMethod.method)
+  assert.equal('Idempotency-Key' in calls[0].init.headers, false)
+})
+
 test('the contract examples themselves carry exactly their declared fields', () => {
-  const { ping, createCheckoutSession, getStatus } = CONTRACT.endpoints
+  const { ping, createCheckoutSession, getStatus, chargePaymentMethod } = CONTRACT.endpoints
 
   assert.deepEqual(Object.keys(ping.example).sort(), [...ping.fields].sort())
   assert.deepEqual(
@@ -201,6 +271,13 @@ test('the contract examples themselves carry exactly their declared fields', () 
     [...createCheckoutSession.checkoutFields].sort(),
   )
   assert.deepEqual(Object.keys(getStatus.example).sort(), [...getStatus.fields].sort())
+  assert.deepEqual(Object.keys(getStatus.savedCardExample).sort(), [...getStatus.fields].sort())
+  assert.deepEqual(
+    Object.keys(getStatus.savedCardExample.paymentMethod).sort(),
+    [...getStatus.paymentMethodFields].sort(),
+  )
+  assert.deepEqual(Object.keys(chargePaymentMethod.successExample).sort(), [...chargePaymentMethod.fields].sort())
+  assert.deepEqual(Object.keys(chargePaymentMethod.declinedExample).sort(), [...chargePaymentMethod.fields].sort())
 })
 
 /** Property names declared on one of the published interfaces, in declaration order. */

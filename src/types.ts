@@ -22,6 +22,14 @@ export interface CreateCheckoutSessionParams {
   theme?: 'light' | 'dark' | 'bright'
   description?: string
   /**
+   * Ask the gateway to keep the card on file once this payment is approved, so you can
+   * charge it again later with {@link DominaiteClient.chargePaymentMethod}. The stored
+   * method shows up on {@link CheckoutStatus.paymentMethod} after the payment succeeds;
+   * a declined first payment stores nothing. The card details themselves never reach
+   * you: you get an id, a brand and the last four digits.
+   */
+  saveCard?: boolean
+  /**
    * Auto-generated when omitted. Retrying with the same key never creates a
    * second payment - on a timeout, retry with the same key.
    */
@@ -86,6 +94,86 @@ export interface CheckoutStatus {
   updatedAt?: string
   /** Present while the session is still payable. */
   expiresAt?: string
+  /**
+   * The card kept on file for this payment. Present once a session created with
+   * saveCard has succeeded; absent otherwise. Store paymentMethod.id against your
+   * customer - it is what {@link DominaiteClient.chargePaymentMethod} takes.
+   */
+  paymentMethod?: PaymentMethod
+  [key: string]: unknown
+}
+
+/**
+ * Every state a stored payment method can be in, in the gateway's own order.
+ *
+ * Only active methods can be charged. revoked is what {@link DominaiteClient.revokePaymentMethod}
+ * leaves behind; expired means the card's expiry date has passed.
+ */
+export const PAYMENT_METHOD_STATUSES = ['active', 'revoked', 'expired'] as const
+
+export type PaymentMethodStatus = (typeof PAYMENT_METHOD_STATUSES)[number]
+
+/** A card kept on file. Never the card number, never the PSP token - only what you may show a customer. */
+export interface PaymentMethod {
+  /** Opaque id, pm_... - the handle you charge and revoke with. */
+  id: string
+  /** Card brand as the gateway reports it, e.g. 'visa', 'mastercard'. */
+  brand: string
+  /** Last four digits of the card number, for display only. */
+  last4: string
+  /** 1 to 12. */
+  expiryMonth: number
+  /** Four digits, e.g. 2029. */
+  expiryYear: number
+  /** Treat any value you do not recognise as not chargeable. */
+  status: PaymentMethodStatus | string
+  [key: string]: unknown
+}
+
+/** Parameters for {@link DominaiteClient.chargePaymentMethod}. */
+export interface ChargePaymentMethodParams {
+  /** MINOR units - 2500 is 25.00 EUR. Integers only, never floats. */
+  amount: number
+  /** ISO 4217, e.g. 'EUR'. */
+  currency: string
+  /** Your own order id, <= 100 chars. Shows up in your dashboard. */
+  orderReference: string
+  description?: string
+  /**
+   * Auto-generated when omitted. Retrying with the same key never charges the card
+   * twice - on a timeout, retry with the same key.
+   */
+  idempotencyKey?: string
+}
+
+/** Every outcome a charge can report. pending is not terminal: keep polling getStatus(). */
+export const CHARGE_STATUSES = ['succeeded', 'failed', 'pending'] as const
+
+export type ChargeStatus = (typeof CHARGE_STATUSES)[number]
+
+/**
+ * Why a charge failed, coarse enough to act on without reading the issuer's code:
+ * - hard: do not retry this card, ask the customer for another one.
+ * - soft_funds: insufficient funds; retry later (after the customer's payday, not in a loop).
+ * - soft_sca_required: the issuer wants the customer present; send them through a hosted
+ *   checkout session with saveCard instead of charging off-session again.
+ * - soft_other: a transient issuer or network condition; one retry later is reasonable.
+ */
+export const DECLINE_CLASSES = ['hard', 'soft_funds', 'soft_sca_required', 'soft_other'] as const
+
+export type DeclineClass = (typeof DECLINE_CLASSES)[number]
+
+/** What {@link DominaiteClient.chargePaymentMethod} returns. */
+export interface PaymentMethodCharge {
+  chargeId: string
+  /** succeeded, failed or pending. Treat anything you do not recognise as still open. */
+  status: ChargeStatus | string
+  /** Present when status is failed. */
+  declineClass?: DeclineClass | string
+  /** The raw decline code, for your logs; branch on declineClass instead. */
+  declineCode?: string
+  /** The transaction the charge created; readable with {@link DominaiteClient.getStatus}. */
+  transactionId: string
   [key: string]: unknown
 }
 

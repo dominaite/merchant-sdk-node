@@ -13,13 +13,24 @@ export type { SessionRefusalErrorCode, ValidationErrorCode } from './errors.js'
 export { signRequest } from './signing.js'
 export type { SignRequestInput } from './signing.js'
 export { verifyWebhook } from './webhooks.js'
-export { TRANSACTION_STATUSES } from './types.js'
+export {
+  CHARGE_STATUSES,
+  DECLINE_CLASSES,
+  PAYMENT_METHOD_STATUSES,
+  TRANSACTION_STATUSES,
+} from './types.js'
 export type {
+  ChargePaymentMethodParams,
+  ChargeStatus,
   CheckoutCustomer,
   CheckoutSession,
   CheckoutStatus,
   CreateCheckoutSessionParams,
+  DeclineClass,
   DominaiteClientOptions,
+  PaymentMethod,
+  PaymentMethodCharge,
+  PaymentMethodStatus,
   Ping,
   RetryOptions,
   TransactionStatus,
