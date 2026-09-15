@@ -3,8 +3,11 @@ import { randomUUID } from 'node:crypto'
 import {
   ApiError,
   AuthenticationError,
+  ChargeError,
   CheckoutRefusedError,
+  DominaiteError,
   RateLimitError,
+  RevokeError,
   TransportError,
 } from './errors.js'
 import { signRequest } from './signing.js'
@@ -17,6 +20,7 @@ import type {
   PaymentMethodCharge,
   Ping,
   RetryOptions,
+  StoredPaymentMethod,
 } from './types.js'
 
 const DEFAULT_BASE_URL = 'https://api.dominaite.com/payments'
@@ -39,6 +43,25 @@ const MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 const MAX_FIELD_CODE_POINTS = 100
 /** Hosts allowed to be reached over plain http, for local development only. */
 const PLAINTEXT_ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
+/**
+ * Statuses that stay generic on the payment-method routes even when the envelope
+ * carries a code: validation (400), authentication (401, 403), unknown id (404) and
+ * rate limiting (429) mean the same thing on every route and keep their usual errors.
+ * Everything else with a code is the gateway telling this route something specific
+ * (a decline, an unknown outcome, a refusal) and arrives as ChargeError / RevokeError.
+ */
+const GENERIC_FAILURE_STATUSES = new Set([400, 401, 403, 404, 429])
+
+/** A parsed reply, whatever its status. Auth and rate-limit failures never get this far. */
+interface Reply {
+  status: number
+  /** The whole JSON body ({} for a 204). */
+  envelope: Record<string, unknown>
+  /** envelope.data when the gateway wrapped the answer, the envelope itself otherwise. */
+  payload: Record<string, unknown>
+  /** envelope.error when present, {} otherwise. */
+  error: Record<string, unknown>
+}
 
 /**
  * Server-side client for the Dominaite merchant API.
@@ -216,26 +239,38 @@ export class DominaiteClient {
 
     // GET signs an EMPTY idempotency key and an EMPTY body.
     const response = await this.#request('GET', `${SESSIONS_PATH}/${normalized}`, null, '')
+    // Passed through as sent, except the card on file: the gateway omits its null fields
+    // on the wire, and the caller gets one shape for it, not two. When the gateway sent no
+    // storedPaymentMethod at all there is no key here either (there is no card).
+    const stored = response['storedPaymentMethod']
+    if (isPlainObject(stored)) {
+      return { ...response, storedPaymentMethod: toStoredPaymentMethod(stored) } as CheckoutStatus
+    }
     return response as CheckoutStatus
   }
 
   /**
    * Charges a card kept on file, off-session: no widget, no payer present.
    *
-   * paymentMethodId is the id from getStatus().paymentMethod of a session you created
-   * with saveCard. The charge is signed like a session and carries an Idempotency-Key
-   * (auto-generated unless you pass one), so retrying after a timeout WITH THE SAME
-   * KEY never charges the card twice.
+   * paymentMethodId is the id from getStatus().storedPaymentMethod of a session you
+   * created with saveCard. The charge is signed like a session and carries an
+   * Idempotency-Key (auto-generated unless you pass one), so retrying after a timeout
+   * WITH THE SAME KEY never charges the card twice; the gateway replays its first answer.
    *
-   * A decline is not an exception: the returned charge has status 'failed' plus a
-   * declineClass telling you whether to give up on the card (hard), wait (soft_funds,
-   * soft_other) or bring the customer back for a hosted session (soft_sca_required).
-   * 'pending' is not terminal - poll getStatus(charge.transactionId).
+   * A decline is not an exception: the gateway answers HTTP 402 and this resolves with a
+   * charge whose status is 'failed' plus a declineClass telling you whether to give up on
+   * the card (hard), wait (soft_funds, soft_other) or bring the customer back for a
+   * hosted session (soft_sca_required). 'pending' is not terminal - poll
+   * getStatus(charge.transactionId).
    *
-   * Throws AuthenticationError, CheckoutRefusedError (the gateway refused to attempt
-   * the charge at all: replayed key, payments off, method not chargeable - inspect
-   * errorCode), RateLimitError, ApiError (404 for an id that is not yours, 4xx
-   * validation), or TransportError (network or 5xx - safe to retry with the same key).
+   * Throws ChargeError when the gateway answered with a code instead of a charge:
+   * CHARGE_OUTCOME_UNKNOWN (502, the charge MAY have happened - poll
+   * error.charge.transactionId, never retry under a new key), CHARGE_FAILED (502, nothing
+   * charged), PAYMENT_METHOD_NOT_ACTIVE or DUPLICATE_REQUEST (409), IDEMPOTENCY_KEY_REUSED
+   * (422), PAYMENT_METHOD_CHARGES_DISABLED or PAYMENT_PROCESSING_UNAVAILABLE (503, retry
+   * later with the same key). Otherwise AuthenticationError, RateLimitError, ApiError
+   * (404 for an id that is not yours, 400 validation) or TransportError (network - safe
+   * to retry with the same key).
    */
   async chargePaymentMethod(
     paymentMethodId: string,
@@ -243,32 +278,64 @@ export class DominaiteClient {
   ): Promise<PaymentMethodCharge> {
     const id = normalizePaymentMethodId(paymentMethodId)
     const { idempotencyKey, body } = this.#prepareChargeRequest(params)
-    const response = await this.#request('POST', `${PAYMENT_METHODS_PATH}/${id}/charges`, body, idempotencyKey)
+    const reply = await this.#send('POST', `${PAYMENT_METHODS_PATH}/${id}/charges`, body, idempotencyKey)
 
-    if (response['success'] === false || typeof response['chargeId'] !== 'string') {
-      throw new CheckoutRefusedError(
-        typeof response['errorCode'] === 'string' ? response['errorCode'] : 'UNKNOWN',
-        typeof response['errorMessage'] === 'string'
-          ? response['errorMessage']
-          : 'The charge was refused.',
-        typeof response['transactionId'] === 'string' ? response['transactionId'] : undefined,
-        response,
-      )
+    const data = isPlainObject(reply.envelope['data']) ? reply.envelope['data'] : undefined
+    const charge = data !== undefined && typeof data['chargeId'] === 'string' ? toCharge(data) : undefined
+    const errorCode = stringOr(reply.error['code'], '')
+
+    // 201 (200 on a durable replay): the charge was placed, whatever its status. 402: the
+    // provider declined; the envelope says success=false but the charge is right there,
+    // status 'failed' with its decline class, so it is a result, not an exception.
+    if (charge !== undefined && (reply.envelope['success'] === true || reply.status === 402)) {
+      return charge
     }
 
-    return response as PaymentMethodCharge
+    if (errorCode !== '' && reply.status >= 400 && !GENERIC_FAILURE_STATUSES.has(reply.status)) {
+      throw new ChargeError(
+        reply.status,
+        errorCode,
+        stringOr(reply.error['message'], 'The charge was refused.'),
+        charge,
+        reply.envelope,
+      )
+    }
+    if (reply.status >= 400) {
+      throw rejection(reply)
+    }
+    throw new ApiError(reply.status, 'The API answered the charge without a charge body')
   }
 
   /**
-   * Revokes a card kept on file. The token is dropped at the payment provider and the
-   * method's status becomes 'revoked'; a later chargePaymentMethod() on it is refused.
-   * Resolves with nothing on success (HTTP 204). An id that is not yours throws an
-   * ApiError with httpStatus 404. Not a payment operation: no idempotency key is signed.
+   * Revokes a card kept on file. The saved credential is deleted at the payment provider
+   * and the method's status becomes 'revoked'; a later chargePaymentMethod() on it is
+   * refused with PAYMENT_METHOD_NOT_ACTIVE. Resolves with nothing on success (HTTP 204),
+   * and again on an already revoked method, so retrying a timed-out revoke is safe.
+   *
+   * Throws RevokeError when the gateway refused and nothing changed:
+   * MERCHANT_API_UNAVAILABLE (503, retry later) or UPSTREAM_CONTRACT_ERROR (502, the
+   * provider refused for good - contact support with the id). An id that is not yours
+   * throws an ApiError with httpStatus 404. Not a payment operation: no idempotency key
+   * is signed.
    */
   async revokePaymentMethod(paymentMethodId: string): Promise<void> {
     const id = normalizePaymentMethodId(paymentMethodId)
     // DELETE signs an EMPTY idempotency key and an EMPTY body, like GET.
-    await this.#request('DELETE', `${PAYMENT_METHODS_PATH}/${id}`, null, '')
+    const reply = await this.#send('DELETE', `${PAYMENT_METHODS_PATH}/${id}`, null, '')
+    if (reply.status < 400) {
+      return
+    }
+
+    const errorCode = stringOr(reply.error['code'], '')
+    if (errorCode !== '' && !GENERIC_FAILURE_STATUSES.has(reply.status)) {
+      throw new RevokeError(
+        reply.status,
+        errorCode,
+        stringOr(reply.error['message'], 'The revoke was refused.'),
+        reply.envelope,
+      )
+    }
+    throw rejection(reply)
   }
 
   #prepareSessionRequest(params: CreateCheckoutSessionParams): { idempotencyKey: string; body: string } {
@@ -297,12 +364,32 @@ export class DominaiteClient {
     return { idempotencyKey: normalizeIdempotencyKey(params.idempotencyKey), body: encodeBody(bodyParams) }
   }
 
+  /** Sends and applies the generic failure rules: 5xx is transport, 4xx is ApiError. */
   async #request(
     method: 'GET' | 'POST' | 'DELETE',
     path: string,
     body: string | null,
     idempotencyKey: string,
   ): Promise<Record<string, unknown>> {
+    const reply = await this.#send(method, path, body, idempotencyKey)
+    if (reply.status >= 400) {
+      throw rejection(reply)
+    }
+    return reply.payload
+  }
+
+  /**
+   * Signs, sends and parses one request. Transport failures, redirects, non-JSON bodies,
+   * authentication failures (401, 403) and rate limiting (429) throw here because they
+   * mean the same thing on every route. Any other status comes back parsed, so a route
+   * can read the code and the data the gateway attached before deciding what it is.
+   */
+  async #send(
+    method: 'GET' | 'POST' | 'DELETE',
+    path: string,
+    body: string | null,
+    idempotencyKey: string,
+  ): Promise<Reply> {
     const json = body ?? ''
     const timestamp = Math.floor(Date.now() / 1000).toString()
     const signature = signRequest({
@@ -357,7 +444,7 @@ export class DominaiteClient {
 
     // 204 carries nothing to parse; the status is the whole answer.
     if (response.status === 204) {
-      return {}
+      return { status: 204, envelope: {}, payload: {}, error: {} }
     }
 
     let raw: string
@@ -405,23 +492,54 @@ export class DominaiteClient {
         retryAfterSeconds,
       )
     }
-    if (response.status >= 500) {
-      throw new TransportError(
-        `The Dominaite API is unavailable (HTTP ${response.status}); retry with the same idempotency key.`,
-      )
-    }
-    if (response.status >= 400) {
-      // Carry the machine-readable code: a validation rejection like
-      // IDEMPOTENCY_KEY_REQUIRED is only actionable if the caller can branch on it.
-      const errorCode = stringOr(payload['errorCode'], stringOr(envelopeError['code'], ''))
-      throw new ApiError(
-        response.status,
-        stringOr(payload['errorMessage'], stringOr(envelopeError['message'], 'Request rejected')),
-        errorCode === '' ? undefined : errorCode,
-      )
-    }
 
-    return payload
+    return { status: response.status, envelope, payload, error: envelopeError }
+  }
+}
+
+/** The generic reading of a failed reply: 5xx is the API being unavailable, 4xx a rejection. */
+function rejection(reply: Reply): DominaiteError {
+  if (reply.status >= 500) {
+    return new TransportError(
+      `The Dominaite API is unavailable (HTTP ${reply.status}); retry with the same idempotency key.`,
+    )
+  }
+  // Carry the machine-readable code: a validation rejection like
+  // IDEMPOTENCY_KEY_REQUIRED is only actionable if the caller can branch on it.
+  const errorCode = stringOr(reply.payload['errorCode'], stringOr(reply.error['code'], ''))
+  return new ApiError(
+    reply.status,
+    stringOr(reply.payload['errorMessage'], stringOr(reply.error['message'], 'Request rejected')),
+    errorCode === '' ? undefined : errorCode,
+  )
+}
+
+/**
+ * The charge body as one shape: the gateway omits declineClass and declineCode when they
+ * are null (every 201, and a 502 CHARGE_FAILED row), so read absent as null. Anything
+ * else the gateway sends is carried through.
+ */
+function toCharge(data: Record<string, unknown>): PaymentMethodCharge {
+  return {
+    ...data,
+    chargeId: String(data['chargeId']),
+    status: stringOr(data['status'], ''),
+    declineClass: typeof data['declineClass'] === 'string' ? data['declineClass'] : null,
+    declineCode: typeof data['declineCode'] === 'string' ? data['declineCode'] : null,
+    transactionId: stringOr(data['transactionId'], ''),
+  }
+}
+
+/** Same rule for the card on file: brand, last4 and the expiry are absent when unreported. */
+function toStoredPaymentMethod(data: Record<string, unknown>): StoredPaymentMethod {
+  return {
+    ...data,
+    id: stringOr(data['id'], ''),
+    brand: typeof data['brand'] === 'string' ? data['brand'] : null,
+    last4: typeof data['last4'] === 'string' ? data['last4'] : null,
+    expiryMonth: typeof data['expiryMonth'] === 'number' ? data['expiryMonth'] : null,
+    expiryYear: typeof data['expiryYear'] === 'number' ? data['expiryYear'] : null,
+    status: stringOr(data['status'], ''),
   }
 }
 
@@ -465,7 +583,7 @@ function normalizeIdempotencyKey(providedKey: unknown): string {
 function normalizePaymentMethodId(paymentMethodId: unknown): string {
   const normalized = String(paymentMethodId ?? '').trim()
   if (!PAYMENT_METHOD_ID_PATTERN.test(normalized)) {
-    throw new TypeError('paymentMethodId must be the id from getStatus().paymentMethod')
+    throw new TypeError('paymentMethodId must be the id from getStatus().storedPaymentMethod')
   }
   return normalized
 }

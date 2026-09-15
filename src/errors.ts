@@ -1,3 +1,5 @@
+import type { PaymentMethodCharge } from './types.js'
+
 /** Base class for every error this SDK throws. */
 export class DominaiteError extends Error {
   constructor(message: string) {
@@ -104,6 +106,101 @@ export class ApiError extends DominaiteError {
     super(message)
     this.httpStatus = httpStatus
     this.errorCode = errorCode
+  }
+}
+
+/**
+ * The codes {@link DominaiteClient.chargePaymentMethod} raises as a {@link ChargeError},
+ * in the gateway's own order. CHARGE_DECLINED (HTTP 402) is deliberately not one of them:
+ * a decline is a charge result with status 'failed', not an exception.
+ */
+export const CHARGE_ERROR_CODES = [
+  'PAYMENT_METHOD_NOT_ACTIVE',
+  'DUPLICATE_REQUEST',
+  'IDEMPOTENCY_KEY_REUSED',
+  'CHARGE_OUTCOME_UNKNOWN',
+  'CHARGE_FAILED',
+  'PAYMENT_METHOD_CHARGES_DISABLED',
+  'PAYMENT_PROCESSING_UNAVAILABLE',
+] as const
+
+/** One of the charge error codes this SDK knows about. Unknown codes arrive as plain strings. */
+export type ChargeErrorCode = (typeof CHARGE_ERROR_CODES)[number]
+
+/**
+ * The gateway answered a charge with an error code instead of a charge result. The
+ * HTTP status is on `httpStatus`, the machine-readable code on `errorCode`, and the
+ * charge row the gateway attached (when it did) on `charge`. Branch on `errorCode`:
+ * - CHARGE_OUTCOME_UNKNOWN (502): the provider gave no verdict and the charge MAY have
+ *   happened. `charge` is present: poll getStatus(charge.transactionId) or wait for the
+ *   webhook. Never retry under a new key.
+ * - CHARGE_FAILED (502): nothing was charged. `charge` is present when a row exists
+ *   (its declineClass and declineCode are null), absent when the provider refused before one.
+ * - PAYMENT_METHOD_NOT_ACTIVE (409): the method is revoked or expired; ask the customer
+ *   for another card via a hosted session with saveCard.
+ * - DUPLICATE_REQUEST (409): a request with this key is still in flight; retry with the
+ *   SAME key in a moment.
+ * - IDEMPOTENCY_KEY_REUSED (422): same key, different body or method; a bug on your side.
+ * - PAYMENT_METHOD_CHARGES_DISABLED, PAYMENT_PROCESSING_UNAVAILABLE (503): nothing was
+ *   charged; retry later with the SAME key.
+ *
+ * `result` is the whole envelope the gateway sent, for fields not modelled above.
+ */
+export class ChargeError extends DominaiteError {
+  readonly httpStatus: number
+  readonly errorCode: string
+  /** The charge row the gateway attached to its answer, when it did. */
+  readonly charge?: PaymentMethodCharge
+  /** Shortcut for charge.transactionId, for polling getStatus(). */
+  readonly transactionId?: string
+  /** The full envelope, for fields not modelled above. */
+  readonly result: Record<string, unknown>
+
+  constructor(
+    httpStatus: number,
+    errorCode: string,
+    message: string,
+    charge?: PaymentMethodCharge,
+    result: Record<string, unknown> = {},
+  ) {
+    super(message)
+    this.httpStatus = httpStatus
+    this.errorCode = errorCode
+    this.charge = charge
+    this.transactionId = charge?.transactionId
+    this.result = result
+  }
+}
+
+/**
+ * The codes {@link DominaiteClient.revokePaymentMethod} raises as a {@link RevokeError},
+ * in the gateway's own order.
+ */
+export const REVOKE_ERROR_CODES = ['UPSTREAM_CONTRACT_ERROR', 'MERCHANT_API_UNAVAILABLE'] as const
+
+/** One of the revoke error codes this SDK knows about. Unknown codes arrive as plain strings. */
+export type RevokeErrorCode = (typeof REVOKE_ERROR_CODES)[number]
+
+/**
+ * The gateway refused to revoke a stored payment method. Nothing changed either way;
+ * branch on `errorCode`:
+ * - MERCHANT_API_UNAVAILABLE (503): the provider is unavailable or throttling; retry later.
+ * - UPSTREAM_CONTRACT_ERROR (502): the provider refused the deletion for a reason a retry
+ *   will not fix; contact support with the payment method id.
+ *
+ * An id that is not yours is still the generic {@link ApiError} with httpStatus 404.
+ */
+export class RevokeError extends DominaiteError {
+  readonly httpStatus: number
+  readonly errorCode: string
+  /** The full envelope, for fields not modelled above. */
+  readonly result: Record<string, unknown>
+
+  constructor(httpStatus: number, errorCode: string, message: string, result: Record<string, unknown> = {}) {
+    super(message)
+    this.httpStatus = httpStatus
+    this.errorCode = errorCode
+    this.result = result
   }
 }
 

@@ -5,13 +5,18 @@ import { fileURLToPath } from 'node:url'
 
 import {
   ApiError,
+  CHARGE_ERROR_CODES,
   CHARGE_STATUSES,
+  ChargeError,
   CheckoutRefusedError,
   DECLINE_CLASSES,
   DominaiteClient,
-  PAYMENT_METHOD_STATUSES,
+  REVOKE_ERROR_CODES,
+  RevokeError,
   SESSION_REFUSAL_ERROR_CODES,
+  STORED_PAYMENT_METHOD_STATUSES,
   TRANSACTION_STATUSES,
+  TransportError,
   VALIDATION_ERROR_CODES,
 } from '../dist/esm/index.js'
 import { VECTOR } from './vector.mjs'
@@ -188,57 +193,192 @@ test('getStatus() carries every status in the vocabulary through untouched', asy
 })
 
 test('the stored payment method exposes exactly the contract fields', () => {
-  assert.deepEqual(declaredFields('PaymentMethod'), CONTRACT.endpoints.getStatus.paymentMethodFields)
-  assert.deepEqual([...PAYMENT_METHOD_STATUSES], CONTRACT.paymentMethodStatusVocabulary)
+  assert.deepEqual(declaredFields('StoredPaymentMethod'), CONTRACT.endpoints.getStatus.storedPaymentMethodFields)
+  assert.deepEqual([...STORED_PAYMENT_METHOD_STATUSES], CONTRACT.storedPaymentMethodStatusVocabulary)
 })
 
 test('the charge exposes exactly the contract fields and vocabularies', () => {
   assert.deepEqual(declaredFields('PaymentMethodCharge'), CONTRACT.endpoints.chargePaymentMethod.fields)
   assert.deepEqual([...CHARGE_STATUSES], CONTRACT.chargeStatusVocabulary)
   assert.deepEqual([...DECLINE_CLASSES], CONTRACT.declineClassVocabulary)
+  assert.deepEqual([...CHARGE_ERROR_CODES], CONTRACT.chargeErrorCodes)
+  assert.deepEqual([...REVOKE_ERROR_CODES], CONTRACT.revokeErrorCodes)
 })
 
-test('getStatus() returns the saved-card example unchanged, payment method included', async () => {
+test('getStatus() returns the saved-card example unchanged, stored payment method included', async () => {
   const example = CONTRACT.endpoints.getStatus.savedCardExample
   const { fetchImpl } = recordingFetch(example)
 
   const status = await makeClient(fetchImpl).getStatus(example.transactionId)
 
   assert.deepEqual(status, example)
-  assert.deepEqual(status.paymentMethod, example.paymentMethod)
-  assert.ok(PAYMENT_METHOD_STATUSES.includes(status.paymentMethod.status))
+  assert.deepEqual(status.storedPaymentMethod, example.storedPaymentMethod)
+  assert.ok(STORED_PAYMENT_METHOD_STATUSES.includes(status.storedPaymentMethod.status))
 })
 
-test('chargePaymentMethod() returns the contract examples unchanged, declined included', async () => {
+test('getStatus() reads an absent storedPaymentMethod as no card and absent card fields as null, like the wire', async () => {
+  // The gateway serializes WhenWritingNull: a session without a saved card has no
+  // storedPaymentMethod key at all, and an unreported brand is a missing key, not null.
+  const { getStatus } = CONTRACT.endpoints
+  const wire = withoutNulls(getStatus.example)
+  assert.equal('storedPaymentMethod' in wire, false)
+  const bare = await makeClient(recordingFetch(wire).fetchImpl).getStatus(getStatus.example.transactionId)
+  // The status passes through as sent; absent and null both read as "no card on file".
+  assert.deepEqual(bare, wire)
+  assert.equal(bare.storedPaymentMethod ?? null, null)
+
+  const unreported = {
+    ...getStatus.savedCardExample,
+    storedPaymentMethod: { id: getStatus.savedCardExample.storedPaymentMethod.id, status: 'active' },
+  }
+  const status = await makeClient(recordingFetch(unreported).fetchImpl).getStatus(unreported.transactionId)
+  assert.deepEqual(status.storedPaymentMethod, {
+    id: unreported.storedPaymentMethod.id,
+    brand: null,
+    last4: null,
+    expiryMonth: null,
+    expiryYear: null,
+    status: 'active',
+  })
+})
+
+test('chargePaymentMethod() returns the 201 charge out of the contract envelope', async () => {
   const { chargePaymentMethod, getStatus } = CONTRACT.endpoints
-  const paymentMethodId = getStatus.savedCardExample.paymentMethod.id
+  const paymentMethodId = getStatus.savedCardExample.storedPaymentMethod.id
+  const example = chargePaymentMethod.successExample
+  const { fetchImpl, calls } = recordingFetch(example, chargePaymentMethod.httpStatus)
 
-  for (const example of [chargePaymentMethod.successExample, chargePaymentMethod.declinedExample]) {
-    const { fetchImpl, calls } = recordingFetch(example, chargePaymentMethod.httpStatus)
+  const charge = await makeClient(fetchImpl).chargePaymentMethod(paymentMethodId, {
+    amount: 8440,
+    currency: 'EUR',
+    orderReference: 'order-1042',
+  })
 
-    const charge = await makeClient(fetchImpl).chargePaymentMethod(paymentMethodId, {
+  assert.deepEqual(charge, example.data)
+  assert.ok(CHARGE_STATUSES.includes(charge.status))
+  assert.equal(charge.declineClass, null)
+  assert.equal(
+    calls[0].url,
+    BASE_URL + chargePaymentMethod.path.replace('{paymentMethodId}', paymentMethodId),
+  )
+  assert.equal(calls[0].init.method, chargePaymentMethod.method)
+  assert.ok(typeof calls[0].init.headers['Idempotency-Key'] === 'string')
+})
+
+test('chargePaymentMethod() returns the 402 decline as a charge with its decline class, never throws', async () => {
+  const { chargePaymentMethod, getStatus } = CONTRACT.endpoints
+  const paymentMethodId = getStatus.savedCardExample.storedPaymentMethod.id
+  const example = chargePaymentMethod.declinedExample
+  const { fetchImpl } = recordingFetch(example, chargePaymentMethod.declinedHttpStatus)
+
+  const charge = await makeClient(fetchImpl).chargePaymentMethod(paymentMethodId, {
+    amount: 8440,
+    currency: 'EUR',
+    orderReference: 'order-1042',
+  })
+
+  assert.deepEqual(charge, example.data)
+  assert.equal(charge.status, 'failed')
+  assert.ok(DECLINE_CLASSES.includes(charge.declineClass))
+  assert.equal(example.error.code, 'CHARGE_DECLINED')
+  assert.equal(CHARGE_ERROR_CODES.includes('CHARGE_DECLINED'), false)
+})
+
+test('chargePaymentMethod() reads an absent declineClass and declineCode as null, like the wire', async () => {
+  const { chargePaymentMethod, getStatus } = CONTRACT.endpoints
+  const paymentMethodId = getStatus.savedCardExample.storedPaymentMethod.id
+  const { fetchImpl } = recordingFetch(withoutNulls(chargePaymentMethod.successExample), chargePaymentMethod.httpStatus)
+
+  const charge = await makeClient(fetchImpl).chargePaymentMethod(paymentMethodId, {
+    amount: 8440,
+    currency: 'EUR',
+    orderReference: 'order-1042',
+  })
+
+  assert.deepEqual(charge, chargePaymentMethod.successExample.data)
+})
+
+test('every charge error example in the contract is a ChargeError with code, status and data intact', async () => {
+  const { chargePaymentMethod, getStatus } = CONTRACT.endpoints
+  const paymentMethodId = getStatus.savedCardExample.storedPaymentMethod.id
+  const seen = new Set()
+
+  for (const example of chargePaymentMethod.errorExamples) {
+    // Both wire forms: nulls spelled out (the fixture) and nulls omitted (the gateway).
+    for (const body of [example.body, withoutNulls(example.body)]) {
+      const { fetchImpl } = recordingFetch(body, example.httpStatus)
+      const error = await rejects(() =>
+        makeClient(fetchImpl).chargePaymentMethod(paymentMethodId, {
+          amount: 8440,
+          currency: 'EUR',
+          orderReference: 'order-1042',
+        }),
+      )
+
+      assert.ok(error instanceof ChargeError, `${example.code} must be a ChargeError, got ${error?.constructor?.name}`)
+      assert.ok(!(error instanceof TransportError))
+      assert.equal(error.httpStatus, example.httpStatus)
+      assert.equal(error.errorCode, example.code)
+      assert.equal(error.message, example.body.error.message)
+      assert.ok(CHARGE_ERROR_CODES.includes(error.errorCode))
+      assert.deepEqual(error.result, body)
+      if (example.body.data) {
+        assert.deepEqual(error.charge, example.body.data)
+        assert.equal(error.transactionId, example.body.data.transactionId)
+      } else {
+        assert.equal(error.charge, undefined)
+        assert.equal(error.transactionId, undefined)
+      }
+    }
+    seen.add(example.code)
+  }
+
+  // The fixture exercises every code the SDK claims to know, and no other.
+  assert.deepEqual([...seen].sort(), [...CHARGE_ERROR_CODES].sort())
+})
+
+test('CHARGE_OUTCOME_UNKNOWN carries the transaction to poll', async () => {
+  const { chargePaymentMethod, getStatus } = CONTRACT.endpoints
+  const paymentMethodId = getStatus.savedCardExample.storedPaymentMethod.id
+  const example = chargePaymentMethod.errorExamples.find((entry) => entry.code === 'CHARGE_OUTCOME_UNKNOWN')
+  const { fetchImpl } = recordingFetch(example.body, example.httpStatus)
+
+  const error = await rejects(() =>
+    makeClient(fetchImpl).chargePaymentMethod(paymentMethodId, {
       amount: 8440,
       currency: 'EUR',
       orderReference: 'order-1042',
-    })
+    }),
+  )
 
-    assert.deepEqual(charge, example)
-    assert.ok(CHARGE_STATUSES.includes(charge.status))
-    assert.equal(
-      calls[0].url,
-      BASE_URL + chargePaymentMethod.path.replace('{paymentMethodId}', paymentMethodId),
-    )
-    assert.equal(calls[0].init.method, chargePaymentMethod.method)
-    assert.ok(typeof calls[0].init.headers['Idempotency-Key'] === 'string')
-  }
+  assert.ok(error instanceof ChargeError)
+  assert.equal(error.transactionId, example.body.data.transactionId)
+  assert.equal(error.charge.chargeId, example.body.data.chargeId)
+})
 
-  const declined = chargePaymentMethod.declinedExample
-  assert.ok(DECLINE_CLASSES.includes(declined.declineClass))
+test('a charge against an unknown id is the generic ApiError 404 with the contract code', async () => {
+  const { chargePaymentMethod, getStatus } = CONTRACT.endpoints
+  const paymentMethodId = getStatus.savedCardExample.storedPaymentMethod.id
+  const example = chargePaymentMethod.notFoundExample
+  const { fetchImpl } = recordingFetch(example.body, example.httpStatus)
+
+  const error = await rejects(() =>
+    makeClient(fetchImpl).chargePaymentMethod(paymentMethodId, {
+      amount: 8440,
+      currency: 'EUR',
+      orderReference: 'order-1042',
+    }),
+  )
+
+  assert.ok(error instanceof ApiError)
+  assert.ok(!(error instanceof ChargeError))
+  assert.equal(error.httpStatus, 404)
+  assert.equal(error.errorCode, example.code)
 })
 
 test('revokePaymentMethod() resolves on the contract 204 with nothing to parse', async () => {
   const { revokePaymentMethod, getStatus } = CONTRACT.endpoints
-  const paymentMethodId = getStatus.savedCardExample.paymentMethod.id
+  const paymentMethodId = getStatus.savedCardExample.storedPaymentMethod.id
   const calls = []
   const fetchImpl = async (url, init) => {
     calls.push({ url, init })
@@ -252,6 +392,42 @@ test('revokePaymentMethod() resolves on the contract 204 with nothing to parse',
   )
   assert.equal(calls[0].init.method, revokePaymentMethod.method)
   assert.equal('Idempotency-Key' in calls[0].init.headers, false)
+})
+
+test('every revoke error example in the contract is a RevokeError with code and status intact', async () => {
+  const { revokePaymentMethod, getStatus } = CONTRACT.endpoints
+  const paymentMethodId = getStatus.savedCardExample.storedPaymentMethod.id
+  const seen = new Set()
+
+  for (const example of revokePaymentMethod.errorExamples) {
+    const { fetchImpl } = recordingFetch(example.body, example.httpStatus)
+    const error = await rejects(() => makeClient(fetchImpl).revokePaymentMethod(paymentMethodId))
+
+    assert.ok(error instanceof RevokeError, `${example.code} must be a RevokeError, got ${error?.constructor?.name}`)
+    assert.ok(!(error instanceof TransportError))
+    assert.equal(error.httpStatus, example.httpStatus)
+    assert.equal(error.errorCode, example.code)
+    assert.equal(error.message, example.body.error.message)
+    assert.ok(REVOKE_ERROR_CODES.includes(error.errorCode))
+    assert.deepEqual(error.result, example.body)
+    seen.add(example.code)
+  }
+
+  assert.deepEqual([...seen].sort(), [...REVOKE_ERROR_CODES].sort())
+})
+
+test('a revoke of an unknown id is the generic ApiError 404', async () => {
+  const { revokePaymentMethod, getStatus } = CONTRACT.endpoints
+  const paymentMethodId = getStatus.savedCardExample.storedPaymentMethod.id
+  const example = revokePaymentMethod.notFoundExample
+  const { fetchImpl } = recordingFetch(example.body, example.httpStatus)
+
+  const error = await rejects(() => makeClient(fetchImpl).revokePaymentMethod(paymentMethodId))
+
+  assert.ok(error instanceof ApiError)
+  assert.ok(!(error instanceof RevokeError))
+  assert.equal(error.httpStatus, 404)
+  assert.equal(error.errorCode, example.code)
 })
 
 test('the contract examples themselves carry exactly their declared fields', () => {
@@ -273,12 +449,32 @@ test('the contract examples themselves carry exactly their declared fields', () 
   assert.deepEqual(Object.keys(getStatus.example).sort(), [...getStatus.fields].sort())
   assert.deepEqual(Object.keys(getStatus.savedCardExample).sort(), [...getStatus.fields].sort())
   assert.deepEqual(
-    Object.keys(getStatus.savedCardExample.paymentMethod).sort(),
-    [...getStatus.paymentMethodFields].sort(),
+    Object.keys(getStatus.savedCardExample.storedPaymentMethod).sort(),
+    [...getStatus.storedPaymentMethodFields].sort(),
   )
-  assert.deepEqual(Object.keys(chargePaymentMethod.successExample).sort(), [...chargePaymentMethod.fields].sort())
-  assert.deepEqual(Object.keys(chargePaymentMethod.declinedExample).sort(), [...chargePaymentMethod.fields].sort())
+  const chargeFields = [...chargePaymentMethod.fields].sort()
+  assert.deepEqual(Object.keys(chargePaymentMethod.successExample.data).sort(), chargeFields)
+  assert.deepEqual(Object.keys(chargePaymentMethod.declinedExample.data).sort(), chargeFields)
+  for (const example of chargePaymentMethod.errorExamples) {
+    assert.equal(example.body.success, false)
+    assert.equal(example.body.error.code, example.code)
+    assert.equal(example.body.error.statusCode, example.httpStatus)
+    if (example.body.data) {
+      assert.deepEqual(Object.keys(example.body.data).sort(), chargeFields)
+    }
+  }
 })
+
+/** The wire form of an example: the gateway serializes WhenWritingNull, so null keys are absent. */
+function withoutNulls(value) {
+  if (Array.isArray(value)) return value.map(withoutNulls)
+  if (typeof value !== 'object' || value === null) return value
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, entry]) => entry !== null)
+      .map(([key, entry]) => [key, withoutNulls(entry)]),
+  )
+}
 
 /** Property names declared on one of the published interfaces, in declaration order. */
 function declaredFields(interfaceName) {

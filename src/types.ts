@@ -24,9 +24,9 @@ export interface CreateCheckoutSessionParams {
   /**
    * Ask the gateway to keep the card on file once this payment is approved, so you can
    * charge it again later with {@link DominaiteClient.chargePaymentMethod}. The stored
-   * method shows up on {@link CheckoutStatus.paymentMethod} after the payment succeeds;
-   * a declined first payment stores nothing. The card details themselves never reach
-   * you: you get an id, a brand and the last four digits.
+   * method shows up on {@link CheckoutStatus.storedPaymentMethod} after the payment
+   * succeeds; a declined first payment stores nothing. The card details themselves never
+   * reach you: you get an id, a brand and the last four digits.
    */
   saveCard?: boolean
   /**
@@ -96,10 +96,15 @@ export interface CheckoutStatus {
   expiresAt?: string
   /**
    * The card kept on file for this payment. Present once a session created with
-   * saveCard has succeeded; absent otherwise. Store paymentMethod.id against your
+   * saveCard has been approved, and it stays present after a revoke with status
+   * 'revoked'; null (absent on the wire) until then, for sessions without saveCard,
+   * and for declined or abandoned ones. Store storedPaymentMethod.id against your
    * customer - it is what {@link DominaiteClient.chargePaymentMethod} takes.
+   *
+   * Not to be confused with the gateway's paymentMethod field, which is the string
+   * category of how the payer paid ('card', 'wallet', ...) and passes through untyped.
    */
-  paymentMethod?: PaymentMethod
+  storedPaymentMethod?: StoredPaymentMethod | null
   [key: string]: unknown
 }
 
@@ -109,24 +114,28 @@ export interface CheckoutStatus {
  * Only active methods can be charged. revoked is what {@link DominaiteClient.revokePaymentMethod}
  * leaves behind; expired means the card's expiry date has passed.
  */
-export const PAYMENT_METHOD_STATUSES = ['active', 'revoked', 'expired'] as const
+export const STORED_PAYMENT_METHOD_STATUSES = ['active', 'revoked', 'expired'] as const
 
-export type PaymentMethodStatus = (typeof PAYMENT_METHOD_STATUSES)[number]
+export type StoredPaymentMethodStatus = (typeof STORED_PAYMENT_METHOD_STATUSES)[number]
 
-/** A card kept on file. Never the card number, never the PSP token - only what you may show a customer. */
-export interface PaymentMethod {
-  /** Opaque id, pm_... - the handle you charge and revoke with. */
+/**
+ * A card kept on file. Never the card number, never the PSP token - only what you may
+ * show a customer. brand, last4 and the expiry are null when the provider did not
+ * report them (the gateway omits null fields on the wire; the SDK reads absent as null).
+ */
+export interface StoredPaymentMethod {
+  /** Opaque id: pm_ followed by 32 hex characters, case-sensitive. The handle you charge and revoke with. */
   id: string
   /** Card brand as the gateway reports it, e.g. 'visa', 'mastercard'. */
-  brand: string
+  brand: string | null
   /** Last four digits of the card number, for display only. */
-  last4: string
+  last4: string | null
   /** 1 to 12. */
-  expiryMonth: number
+  expiryMonth: number | null
   /** Four digits, e.g. 2029. */
-  expiryYear: number
+  expiryYear: number | null
   /** Treat any value you do not recognise as not chargeable. */
-  status: PaymentMethodStatus | string
+  status: StoredPaymentMethodStatus | string
   [key: string]: unknown
 }
 
@@ -146,8 +155,15 @@ export interface ChargePaymentMethodParams {
   idempotencyKey?: string
 }
 
-/** Every outcome a charge can report. pending is not terminal: keep polling getStatus(). */
-export const CHARGE_STATUSES = ['succeeded', 'failed', 'pending'] as const
+/**
+ * Every outcome a charge can report, in the gateway's own order.
+ *
+ * succeeded: the money moved. failed: it did not; on a 402 declineClass says why.
+ * pending: the provider has not answered yet, poll getStatus(transactionId). cancelled:
+ * an authorization voided before capture, no money moved. Treat an unknown value as
+ * still open.
+ */
+export const CHARGE_STATUSES = ['succeeded', 'failed', 'pending', 'cancelled'] as const
 
 export type ChargeStatus = (typeof CHARGE_STATUSES)[number]
 
@@ -163,15 +179,20 @@ export const DECLINE_CLASSES = ['hard', 'soft_funds', 'soft_sca_required', 'soft
 
 export type DeclineClass = (typeof DECLINE_CLASSES)[number]
 
-/** What {@link DominaiteClient.chargePaymentMethod} returns. */
+/**
+ * What {@link DominaiteClient.chargePaymentMethod} returns, for a placed charge (HTTP 201)
+ * and for a provider decline (HTTP 402, status 'failed') alike. Also carried on a
+ * {@link ChargeError} when the gateway attached the charge row to its answer.
+ */
 export interface PaymentMethodCharge {
+  /** ch_ followed by 32 hex characters. Store it against the order; it is what support asks for. */
   chargeId: string
-  /** succeeded, failed or pending. Treat anything you do not recognise as still open. */
+  /** succeeded, failed, pending or cancelled. Treat anything you do not recognise as still open. */
   status: ChargeStatus | string
-  /** Present when status is failed. */
-  declineClass?: DeclineClass | string
-  /** The raw decline code, for your logs; branch on declineClass instead. */
-  declineCode?: string
+  /** Set on a 402 decline; null everywhere else (the SDK reads absent as null). */
+  declineClass: DeclineClass | string | null
+  /** The raw decline code, for your logs; branch on declineClass instead. Null when declineClass is. */
+  declineCode: string | null
   /** The transaction the charge created; readable with {@link DominaiteClient.getStatus}. */
   transactionId: string
   [key: string]: unknown
