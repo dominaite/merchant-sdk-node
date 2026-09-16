@@ -4,13 +4,15 @@ import { test } from 'node:test'
 import {
   ApiError,
   AuthenticationError,
+  ChargeError,
   CheckoutRefusedError,
   DominaiteClient,
   RateLimitError,
+  RevokeError,
   TransportError,
   signRequest,
 } from '../dist/esm/index.js'
-import { VECTOR } from './vector.mjs'
+import { CHARGE_VECTOR, PAYMENT_METHOD_ID, REVOKE_VECTOR, VECTOR } from './vector.mjs'
 
 const KEY_ID = 'dmk_0123456789abcdef0123456789abcdef'
 const BASE_URL = 'https://dev.example.test/payments'
@@ -698,4 +700,259 @@ test('the default baseUrl is https and trailing slashes are still stripped', asy
 
   await client.createCheckoutSession(SESSION_PARAMS)
   assert.equal(calls[0].url, `${BASE_URL}${DominaiteClient.SESSIONS_PATH}`)
+})
+
+// Stored payment methods: saveCard on a session, storedPaymentMethod on its status, then
+// off-session charges and revocation against /merchant-api/payment-methods/{id}.
+
+const CHARGE_PARAMS = {
+  amount: 2500,
+  currency: 'EUR',
+  orderReference: 'order-1043',
+  idempotencyKey: CHARGE_VECTOR.idempotencyKey,
+}
+
+// The wire form of a placed charge: success=true, the charge under data, and no
+// declineClass/declineCode keys at all (the gateway omits nulls).
+const CHARGE = {
+  chargeId: 'ch_33333333333343338333333333333333',
+  status: 'succeeded',
+  transactionId: '33333333-3333-4333-8333-333333333333',
+}
+const CHARGE_RESULT = { ...CHARGE, declineClass: null, declineCode: null }
+const placed = (charge = CHARGE) => ({ status: 201, body: { success: true, data: charge } })
+
+test('saveCard is sent in the session body and nowhere else', async () => {
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+  await makeClient(fetchImpl).createCheckoutSession({ ...SESSION_PARAMS, saveCard: true })
+
+  const { init } = calls[0]
+  assert.equal(JSON.parse(init.body).saveCard, true)
+  assert.equal(init.headers['X-Signature'], signRequest({
+    secret: VECTOR.secret,
+    timestamp: init.headers['X-Timestamp'],
+    method: 'POST',
+    path: DominaiteClient.SESSIONS_PATH,
+    idempotencyKey: VECTOR.idempotencyKey,
+    body: init.body,
+  }))
+})
+
+test('getStatus passes the stored payment method through and leaves paymentMethod the string it is', async () => {
+  const storedPaymentMethod = {
+    id: PAYMENT_METHOD_ID, brand: 'visa', last4: '4242', expiryMonth: 12, expiryYear: 2029, status: 'active',
+  }
+  const { fetchImpl } = recordingFetch({
+    body: {
+      success: true,
+      data: {
+        transactionId: CHECKOUT.transactionId, status: 'succeeded', amount: 2500, currency: 'EUR',
+        paymentMethod: 'card', walletType: null, storedPaymentMethod,
+      },
+    },
+  })
+
+  const status = await makeClient(fetchImpl).getStatus(CHECKOUT.transactionId)
+  assert.deepEqual(status.storedPaymentMethod, storedPaymentMethod)
+  // The gateway's own paymentMethod is a category string, not the card; it is not typed
+  // by this SDK but it must not be mistaken for, or clobbered by, the card on file.
+  assert.equal(status.paymentMethod, 'card')
+})
+
+test('getStatus normalises an unreported brand and expiry to null, and adds no key when there is no card', async () => {
+  const bare = { transactionId: CHECKOUT.transactionId, status: 'pending', amount: 2500, currency: 'EUR' }
+  const { fetchImpl } = recordingFetch({ body: { success: true, data: bare } })
+  assert.deepEqual(await makeClient(fetchImpl).getStatus(CHECKOUT.transactionId), bare)
+
+  const unreported = recordingFetch({
+    body: { success: true, data: { ...bare, status: 'succeeded', storedPaymentMethod: { id: PAYMENT_METHOD_ID, status: 'active' } } },
+  })
+  const status = await makeClient(unreported.fetchImpl).getStatus(CHECKOUT.transactionId)
+  assert.deepEqual(status.storedPaymentMethod, {
+    id: PAYMENT_METHOD_ID, brand: null, last4: null, expiryMonth: null, expiryYear: null, status: 'active',
+  })
+})
+
+test('chargePaymentMethod signs the charge vector byte-for-byte', async () => {
+  const { fetchImpl, calls } = recordingFetch(placed())
+  const charge = await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS)
+
+  assert.deepEqual(charge, CHARGE_RESULT)
+  const { url, init } = calls[0]
+  assert.equal(url, `${BASE_URL}${CHARGE_VECTOR.path}`)
+  assert.equal(init.method, 'POST')
+  assert.equal(init.body, CHARGE_VECTOR.body)
+  assert.equal(init.headers['Idempotency-Key'], CHARGE_VECTOR.idempotencyKey)
+  assert.ok(!init.body.includes('idempotencyKey'), 'idempotencyKey must not leak into the body')
+
+  // Pin the exact vector: with the vector's timestamp the header is the vector signature.
+  assert.equal(init.headers['X-Signature'], signRequest({ ...CHARGE_VECTOR, timestamp: init.headers['X-Timestamp'] }))
+  assert.equal(signRequest({ ...CHARGE_VECTOR, timestamp: CHARGE_VECTOR.timestamp }), CHARGE_VECTOR.signature)
+})
+
+test('chargePaymentMethod generates an idempotency key when none is given, and sends description', async () => {
+  const { fetchImpl, calls } = recordingFetch(placed())
+  const { idempotencyKey: _omitted, ...withoutKey } = CHARGE_PARAMS
+  await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, { ...withoutKey, description: 'Monthly plan' })
+
+  const { init } = calls[0]
+  assert.match(init.headers['Idempotency-Key'], /^[0-9a-f-]{36}$/)
+  assert.deepEqual(JSON.parse(init.body), {
+    amount: 2500, currency: 'EUR', orderReference: 'order-1043', description: 'Monthly plan',
+  })
+})
+
+test('a 402 decline is a result with a decline class, not an exception', async () => {
+  const declined = { ...CHARGE, status: 'failed', declineClass: 'soft_funds', declineCode: '51' }
+  const { fetchImpl } = recordingFetch({
+    status: 402,
+    body: {
+      success: false,
+      data: declined,
+      error: { code: 'CHARGE_DECLINED', message: 'The payment provider declined the charge.', statusCode: 402 },
+    },
+  })
+
+  const charge = await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS)
+  assert.deepEqual(charge, declined)
+  assert.equal(charge.status, 'failed')
+  assert.equal(charge.declineClass, 'soft_funds')
+  assert.equal(charge.declineCode, '51')
+})
+
+test('a 200 durable replay of a placed charge is a result too', async () => {
+  const { fetchImpl } = recordingFetch({ status: 200, body: { success: true, data: { ...CHARGE, status: 'pending' } } })
+  const charge = await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS)
+  assert.equal(charge.status, 'pending')
+  assert.equal(charge.chargeId, CHARGE.chargeId)
+})
+
+test('a charge the gateway answers with a code is a ChargeError keeping code, status and data', async () => {
+  const unknown = { ...CHARGE, status: 'pending' }
+  const { fetchImpl } = recordingFetch({
+    status: 502,
+    body: {
+      success: false,
+      data: unknown,
+      error: { code: 'CHARGE_OUTCOME_UNKNOWN', message: 'The payment provider gave no verdict.', statusCode: 502 },
+    },
+  })
+
+  await assert.rejects(
+    makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS),
+    (error) => {
+      assert.ok(error instanceof ChargeError)
+      assert.ok(!(error instanceof TransportError), 'a 502 with a code must not look retryable')
+      assert.equal(error.httpStatus, 502)
+      assert.equal(error.errorCode, 'CHARGE_OUTCOME_UNKNOWN')
+      assert.equal(error.message, 'The payment provider gave no verdict.')
+      assert.deepEqual(error.charge, { ...unknown, declineClass: null, declineCode: null })
+      assert.equal(error.transactionId, CHARGE.transactionId)
+      return true
+    },
+  )
+})
+
+test('a charge refused without a row is a ChargeError with no charge attached', async () => {
+  for (const [status, code] of [[409, 'PAYMENT_METHOD_NOT_ACTIVE'], [409, 'DUPLICATE_REQUEST'], [422, 'IDEMPOTENCY_KEY_REUSED'], [503, 'PAYMENT_METHOD_CHARGES_DISABLED'], [503, 'PAYMENT_PROCESSING_UNAVAILABLE'], [502, 'CHARGE_FAILED']]) {
+    const { fetchImpl } = recordingFetch({ status, body: { success: false, error: { code, message: 'refused', statusCode: status } } })
+    await assert.rejects(
+      makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS),
+      (error) => error instanceof ChargeError
+        && error.httpStatus === status
+        && error.errorCode === code
+        && error.charge === undefined
+        && error.transactionId === undefined,
+      `${status} ${code}`,
+    )
+  }
+})
+
+test('a 5xx without a code on the charge route is still a TransportError', async () => {
+  // A proxy or a crash answering instead of the gateway: nothing to branch on, so the
+  // generic rule stands and the caller retries with the same key.
+  const { fetchImpl } = recordingFetch({ status: 503, body: { success: false } })
+  await assert.rejects(makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS), TransportError)
+})
+
+test('a charge against a method that is not yours is an ApiError 404', async () => {
+  const { fetchImpl } = recordingFetch({ status: 404, body: { success: false, error: { code: 'PAYMENT_METHOD_NOT_FOUND', message: 'No stored payment method with this id.' } } })
+
+  await assert.rejects(
+    makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS),
+    (error) => error instanceof ApiError && !(error instanceof ChargeError) && error.httpStatus === 404 && error.errorCode === 'PAYMENT_METHOD_NOT_FOUND',
+  )
+})
+
+test('a 2xx without a charge body is an ApiError, not a half-built charge', async () => {
+  const { fetchImpl } = recordingFetch({ status: 201, body: { success: true } })
+  await assert.rejects(
+    makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS),
+    (error) => error instanceof ApiError && error.httpStatus === 201,
+  )
+})
+
+test('chargePaymentMethod validates money params like a session does', async () => {
+  const client = makeClient(recordingFetch(placed()).fetchImpl)
+  await assert.rejects(client.chargePaymentMethod(PAYMENT_METHOD_ID, { ...CHARGE_PARAMS, amount: 25.5 }), TypeError)
+  await assert.rejects(client.chargePaymentMethod(PAYMENT_METHOD_ID, { ...CHARGE_PARAMS, amount: 0 }), TypeError)
+  await assert.rejects(client.chargePaymentMethod(PAYMENT_METHOD_ID, { ...CHARGE_PARAMS, orderReference: '' }), TypeError)
+  await assert.rejects(client.chargePaymentMethod(PAYMENT_METHOD_ID, { ...CHARGE_PARAMS, description: 7 }), TypeError)
+})
+
+test('a payment method id that would not stay one path segment is refused before signing', async () => {
+  const { fetchImpl, calls } = recordingFetch(placed())
+  const client = makeClient(fetchImpl)
+  for (const bad of ['', ' ', 'pm_1/charges', 'pm_1?x=1', 'pm_1#f', 'pm 1', 'pm_1%2F', 'p'.repeat(101)]) {
+    await assert.rejects(client.chargePaymentMethod(bad, CHARGE_PARAMS), TypeError, `accepted ${JSON.stringify(bad)}`)
+    await assert.rejects(client.revokePaymentMethod(bad), TypeError, `accepted ${JSON.stringify(bad)}`)
+  }
+  assert.equal(calls.length, 0)
+})
+
+test('revokePaymentMethod signs the revoke vector: DELETE, empty key, empty body, resolves on 204', async () => {
+  const { fetchImpl, calls } = recordingFetch(() => new Response(null, { status: 204 }))
+  const result = await makeClient(fetchImpl).revokePaymentMethod(PAYMENT_METHOD_ID)
+
+  assert.equal(result, undefined)
+  const { url, init } = calls[0]
+  assert.equal(url, `${BASE_URL}${REVOKE_VECTOR.path}`)
+  assert.equal(init.method, 'DELETE')
+  assert.equal(init.body, undefined)
+  assert.equal('Idempotency-Key' in init.headers, false)
+  assert.equal(init.headers['X-Signature'], signRequest({ ...REVOKE_VECTOR, timestamp: init.headers['X-Timestamp'] }))
+  assert.equal(signRequest(REVOKE_VECTOR), REVOKE_VECTOR.signature)
+})
+
+test('revokePaymentMethod surfaces a 404 as an ApiError and a coded 502/503 as a RevokeError', async () => {
+  const notFound = recordingFetch({ status: 404, body: { success: false, error: { code: 'VALIDATION_ERROR', message: 'Validation failed', statusCode: 404 } } })
+  await assert.rejects(
+    makeClient(notFound.fetchImpl).revokePaymentMethod(PAYMENT_METHOD_ID),
+    (error) => error instanceof ApiError && !(error instanceof RevokeError) && error.httpStatus === 404,
+  )
+
+  for (const [status, code] of [[503, 'MERCHANT_API_UNAVAILABLE'], [502, 'UPSTREAM_CONTRACT_ERROR']]) {
+    const refused = recordingFetch({ status, body: { success: false, error: { code, message: 'nothing changed', statusCode: status } } })
+    await assert.rejects(
+      makeClient(refused.fetchImpl).revokePaymentMethod(PAYMENT_METHOD_ID),
+      (error) => error instanceof RevokeError
+        && !(error instanceof TransportError)
+        && error.httpStatus === status
+        && error.errorCode === code
+        && error.message === 'nothing changed',
+      `${status} ${code}`,
+    )
+  }
+
+  // No code to branch on (a proxy answering instead of the gateway): the generic rule stands.
+  const down = recordingFetch({ status: 503, body: { success: false } })
+  await assert.rejects(makeClient(down.fetchImpl).revokePaymentMethod(PAYMENT_METHOD_ID), TransportError)
+})
+
+test('revokePaymentMethod resolves on a 204 for an already revoked method too', async () => {
+  const { fetchImpl, calls } = recordingFetch(() => new Response(null, { status: 204 }))
+  const client = makeClient(fetchImpl)
+  await client.revokePaymentMethod(PAYMENT_METHOD_ID)
+  await client.revokePaymentMethod(PAYMENT_METHOD_ID)
+  assert.equal(calls.length, 2)
 })

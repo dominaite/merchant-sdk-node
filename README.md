@@ -235,6 +235,116 @@ A session is valid for 2 hours. If the payer comes back later, create a new sess
 few minutes past `expiresAt` you can re-POST the **same** idempotency key to get one, so keep the
 order-derived key for the life of the order (see "Recovering from a replay refusal").
 
+## Stored payment methods (recurring)
+
+Pass `saveCard: true` when you create a session and, once that payment is approved, the gateway
+keeps the card on file. You never see the card number or the provider token: `getStatus()` returns
+a `storedPaymentMethod` with an opaque `id` (`pm_` + 32 hex characters), the `brand`, the `last4`
+and the expiry, and that `id` is what you charge and revoke with. Store it against your customer.
+(`paymentMethod` on the same status is something else: the gateway's string category of how the
+payer paid, `card`, `wallet` and so on.)
+
+```js
+import { ChargeError, RevokeError } from '@dominaite/merchant-sdk'
+
+const session = await client.createCheckoutSession({
+  amount: 2500,
+  currency: 'EUR',
+  orderReference: 'sub-8817-first',
+  saveCard: true,
+})
+// ... the payer completes the hosted checkout ...
+const status = await client.getStatus(session.transactionId)
+if (status.status === 'succeeded' && status.storedPaymentMethod?.status === 'active') {
+  await db.saveCard(customerId, status.storedPaymentMethod.id) // pm_...
+}
+
+// Later, off-session, no payer present:
+try {
+  const charge = await client.chargePaymentMethod(paymentMethodId, {
+    amount: 2500,
+    currency: 'EUR',
+    orderReference: 'sub-8817-2026-10',
+    description: 'Monthly plan, October',
+    idempotencyKey: 'sub-8817-2026-10', // derive it from the billing period, never random per attempt
+  })
+
+  switch (charge.status) {
+    case 'succeeded':
+      break
+    case 'pending':
+      // Not terminal. Poll getStatus(charge.transactionId), or wait for the webhook.
+      break
+    case 'failed':
+      // HTTP 402 from the gateway, but not an exception: branch on the class, log the code.
+      // hard              - give up on this card, ask the customer for another one
+      // soft_funds        - insufficient funds, retry later (not in a loop)
+      // soft_sca_required - the issuer wants the customer present: send them through a
+      //                     hosted session with saveCard and charge the new method
+      // soft_other        - transient, one retry later is reasonable
+      handleDecline(charge.declineClass, charge.declineCode)
+      break
+    case 'cancelled':
+      // An authorization voided before capture; no money moved.
+      break
+  }
+} catch (error) {
+  if (error instanceof ChargeError) {
+    switch (error.errorCode) {
+      case 'CHARGE_OUTCOME_UNKNOWN':
+        // 502: the provider gave no verdict, the charge MAY have happened. Never retry
+        // under a new key: poll the transaction the gateway attached instead.
+        await pollUntilSettled(error.charge.transactionId)
+        break
+      case 'DUPLICATE_REQUEST':
+      case 'PAYMENT_METHOD_CHARGES_DISABLED':
+      case 'PAYMENT_PROCESSING_UNAVAILABLE':
+        // Nothing was charged; retry later with the SAME idempotency key.
+        break
+      case 'PAYMENT_METHOD_NOT_ACTIVE':
+        // Revoked or expired: bring the customer back for a hosted session with saveCard.
+        break
+      case 'CHARGE_FAILED':
+        // 502, nothing was charged. error.charge is present when a row exists.
+        break
+      case 'IDEMPOTENCY_KEY_REUSED':
+        // Same key, different body or method: a bug on your side.
+        break
+    }
+  } else {
+    throw error
+  }
+}
+
+// When the customer removes the card:
+try {
+  await client.revokePaymentMethod(paymentMethodId) // 204, resolves with nothing; 204 again if already revoked
+} catch (error) {
+  if (error instanceof RevokeError && error.errorCode === 'MERCHANT_API_UNAVAILABLE') {
+    // 503: nothing changed, retry later.
+  } else if (error instanceof RevokeError) {
+    // 502 UPSTREAM_CONTRACT_ERROR: the provider refused for good, nothing changed. Contact support with the id.
+  }
+}
+```
+
+A charge is signed exactly like a session and carries an `Idempotency-Key`, so a retry after a
+timeout with the **same** key never charges the card twice: the gateway replays its first answer,
+HTTP status included. The HTTP status is the contract on this route: 201 (or 200 on a replay)
+resolves with the charge, 402 resolves with the charge too (`status: 'failed'` plus
+`declineClass`), and 409, 422, 502 and 503 throw `ChargeError` with `errorCode`, `httpStatus`,
+the gateway's message and, when the gateway attached the charge row, `charge` and
+`transactionId`. Only authentication (401/403), an id that is not yours (404, `ApiError`),
+validation (400, `ApiError`), rate limiting (429) and network failures keep their generic
+errors. `declineClass` and `declineCode` are `null` unless the charge was declined; the gateway
+omits them on the wire and the SDK reads absent as null.
+
+Revoking signs an empty key and an empty body, like `getStatus()`. A revoke that fails with
+`RevokeError` changed nothing: `MERCHANT_API_UNAVAILABLE` (503) is retryable,
+`UPSTREAM_CONTRACT_ERROR` (502) is not. After a revoke the status read keeps the
+`storedPaymentMethod` with `status: 'revoked'`, and a charge against it is refused with
+`PAYMENT_METHOD_NOT_ACTIVE`.
+
 ## Webhooks
 
 Register an endpoint in the Dominaite dashboard, **Webhooks** tab: an HTTPS URL, the events you

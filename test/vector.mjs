@@ -12,6 +12,34 @@ export const VECTOR = {
   signature: '8f5fba0b29a8eea81b76a0e6d7119e79ec68f586910f77713b045652e5ce9b74',
 }
 
+// Stored-payment-method vectors, same secret and timestamp. CHARGE_VECTOR is the only
+// POST besides sessions and the only one whose canonical path carries a resource id;
+// REVOKE_VECTOR pins that DELETE signs an empty key and an empty body exactly like GET.
+// Shared byte-for-byte with the gateway's MerchantApiRequestAuthenticator tests.
+export const PAYMENT_METHOD_ID = 'pm_0123456789abcdef0123456789abcdef'
+
+export const CHARGE_VECTOR = {
+  secret: VECTOR.secret,
+  timestamp: VECTOR.timestamp,
+  method: 'POST',
+  path: `/merchant-api/payment-methods/${PAYMENT_METHOD_ID}/charges`,
+  idempotencyKey: '00000000-0000-4000-8000-000000000003',
+  body: '{"amount":2500,"currency":"EUR","orderReference":"order-1043"}',
+  bodySha256: '641a0d2b08f88ebc458dca49410dede0a166359a5030bff5c977e507f13ab828',
+  signature: '9ce9f54efa2533a46aa4493b97b56aeb657f41d6a18f1c008c7fd412029aebf9',
+}
+
+export const REVOKE_VECTOR = {
+  secret: VECTOR.secret,
+  timestamp: VECTOR.timestamp,
+  method: 'DELETE',
+  path: `/merchant-api/payment-methods/${PAYMENT_METHOD_ID}`,
+  idempotencyKey: '',
+  body: '',
+  bodySha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+  signature: '9330100343c4b820504890a09829a193d5815ca39e92160fdfc13d320a802a02',
+}
+
 // The cross-SDK webhook vector from WEBHOOKS-CONTRACT.md. Every Dominaite SDK pins this
 // same byte sequence - the body is a single line reproduced exactly as the gateway sends
 // it, so do NOT reformat, reindent or re-serialize it. The secret is a dummy.
