@@ -7,8 +7,12 @@ import {
   ChargeError,
   CheckoutRefusedError,
   DominaiteClient,
+  ErrorCodes,
   RateLimitError,
   RevokeError,
+  SESSION_REFUSAL_ERROR_CODES,
+  STOREFRONT_ERROR_CODES,
+  StorefrontError,
   TransportError,
   signRequest,
 } from '../dist/esm/index.js'
@@ -975,4 +979,110 @@ test('revokePaymentMethod resolves on a 204 for an already revoked method too', 
   await client.revokePaymentMethod(PAYMENT_METHOD_ID)
   await client.revokePaymentMethod(PAYMENT_METHOD_ID)
   assert.equal(calls.length, 2)
+})
+
+// Storefront refusals: the website a session or charge would be attributed to is not
+// whitelisted, inactive, or not the one the key is bound to. A config problem, never retried.
+
+const STOREFRONT_REFUSALS = [
+  { code: 'STOREFRONT_NOT_WHITELISTED', status: 409 },
+  { code: 'STOREFRONT_INACTIVE', status: 409 },
+  { code: 'STOREFRONT_MISMATCH', status: 400 },
+]
+
+test('a 409 STOREFRONT_NOT_WHITELISTED is a StorefrontError the caller can match on its code', async () => {
+  const { fetchImpl } = recordingFetch({
+    status: 409,
+    body: {
+      success: false,
+      error: {
+        code: 'STOREFRONT_NOT_WHITELISTED',
+        message: "This storefront's domain is not yet whitelisted with the payment provider",
+      },
+    },
+  })
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    (error) => {
+      assert.ok(error instanceof StorefrontError)
+      assert.ok(error instanceof ApiError, 'an existing ApiError branch must still catch it')
+      assert.ok(!(error instanceof CheckoutRefusedError))
+      assert.ok(!(error instanceof TransportError))
+      assert.equal(error.httpStatus, 409)
+      assert.equal(error.errorCode, ErrorCodes.STOREFRONT_NOT_WHITELISTED)
+      assert.equal(error.message, "This storefront's domain is not yet whitelisted with the payment provider")
+      return true
+    },
+  )
+})
+
+test('every storefront code is a StorefrontError on sessions, in both wire forms', async () => {
+  for (const { code, status } of STOREFRONT_REFUSALS) {
+    for (const body of [{ success: false, error: { code, message: 'refused' } }, { errorCode: code, errorMessage: 'refused' }]) {
+      const { fetchImpl } = recordingFetch({ status, body })
+      await assert.rejects(
+        () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+        (error) => {
+          assert.ok(error instanceof StorefrontError, `${code} must be a StorefrontError`)
+          assert.equal(error.httpStatus, status)
+          assert.equal(error.errorCode, code)
+          return true
+        },
+      )
+    }
+  }
+  assert.deepEqual([...STOREFRONT_ERROR_CODES].sort(), STOREFRONT_REFUSALS.map((entry) => entry.code).sort())
+})
+
+test('the retry helper does not retry a storefront refusal', async () => {
+  let attempts = 0
+  const fetchImpl = async () => {
+    attempts++
+    return jsonResponse(409, { success: false, error: { code: 'STOREFRONT_NOT_WHITELISTED', message: 'refused' } })
+  }
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, { attempts: 3, baseDelayMs: 1 }),
+    StorefrontError,
+  )
+  assert.equal(attempts, 1)
+})
+
+test('a storefront refusal on a charge is a StorefrontError, not a ChargeError', async () => {
+  const { fetchImpl } = recordingFetch({
+    status: 409,
+    body: { success: false, error: { code: 'STOREFRONT_INACTIVE', message: 'This storefront is inactive' } },
+  })
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS),
+    (error) => {
+      assert.ok(error instanceof StorefrontError)
+      assert.ok(!(error instanceof ChargeError))
+      assert.equal(error.errorCode, ErrorCodes.STOREFRONT_INACTIVE)
+      return true
+    },
+  )
+})
+
+test('ErrorCodes names each code as itself and cannot be changed at runtime', () => {
+  for (const [name, value] of Object.entries(ErrorCodes)) {
+    assert.equal(value, name)
+  }
+  assert.deepEqual(Object.keys(ErrorCodes).sort(), [
+    'ALREADY_PROCESSED',
+    'DUPLICATE_REQUEST',
+    'IDEMPOTENCY_KEY_REUSED',
+    'PAYMENT_PROCESSING_UNAVAILABLE',
+    'PRIOR_ATTEMPT_FAILED',
+    'STOREFRONT_INACTIVE',
+    'STOREFRONT_MISMATCH',
+    'STOREFRONT_NOT_WHITELISTED',
+  ])
+  assert.ok(Object.isFrozen(ErrorCodes))
+  // The replay and availability constants are the refusal codes a session actually raises.
+  for (const code of ['ALREADY_PROCESSED', 'PRIOR_ATTEMPT_FAILED', 'DUPLICATE_REQUEST', 'PAYMENT_PROCESSING_UNAVAILABLE', 'IDEMPOTENCY_KEY_REUSED']) {
+    assert.ok(SESSION_REFUSAL_ERROR_CODES.includes(ErrorCodes[code]))
+  }
 })

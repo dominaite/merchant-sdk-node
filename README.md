@@ -525,6 +525,7 @@ Everything thrown by the SDK extends `DominaiteError`.
 | Error | When | What to do |
 |---|---|---|
 | `CheckoutRefusedError` | The API answered, `success: false`. `errorCode` carries the reason. | Branch on `errorCode`. Do not blind-retry. |
+| `StorefrontError` | 409 or 400 about the website the payment belongs to. `errorCode` is a storefront code, see below. Extends `ApiError`. | Fix the storefront setup. Retrying does not help. |
 | `AuthenticationError` | 401/403. `errorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `RateLimitError` | 429. You went over 60 requests/min for the key or 120/min for the IP. `retryAfterSeconds` carries `Retry-After` when it was a whole number of seconds, else `null`. | Wait `retryAfterSeconds` (or your own backoff), then send it again with the **same** idempotency key. The SDK does not retry this for you. |
 | `TransportError` | Network failure, timeout, 5xx (`MERCHANT_API_UNAVAILABLE`), or a response body over 10MB. | Retry with the **same** idempotency key, and expect a replay refusal if the first attempt did land. |
@@ -540,6 +541,44 @@ Refusal codes on `CheckoutRefusedError.errorCode`:
 - `ALREADY_PROCESSED` - this idempotency key's payment already completed.
 - `PRIOR_ATTEMPT_FAILED` - a prior attempt with this key failed terminally; use a fresh key.
 - `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
+
+Every code above has a named constant on `ErrorCodes`, so a typo fails to compile instead of
+silently never matching:
+
+```js
+import { CheckoutRefusedError, ErrorCodes } from '@dominaite/merchant-sdk'
+
+if (error instanceof CheckoutRefusedError && error.errorCode === ErrorCodes.ALREADY_PROCESSED) {
+  // ...
+}
+```
+
+### Storefront errors
+
+If you run more than one website under one merchant account, every session and charge is
+attributed to a storefront (one website). When the gateway cannot use that storefront it refuses
+the request before anything is created, and the SDK throws `StorefrontError`:
+
+| `errorCode` | HTTP | Meaning | What to do |
+|---|---|---|---|
+| `STOREFRONT_NOT_WHITELISTED` | 409 | The site's domain is not whitelisted at the payment provider yet. Usually a new website. | Ask Dominaite support to finish the whitelisting. |
+| `STOREFRONT_INACTIVE` | 409 | The storefront was deactivated or deleted. | Use the key for an active site, or ask Dominaite support to reactivate it. |
+| `STOREFRONT_MISMATCH` | 400 | The storefront in the request is not the one your API key is bound to. | Use the API key issued for that website. |
+
+```js
+import { ErrorCodes, StorefrontError } from '@dominaite/merchant-sdk'
+
+try {
+  session = await client.createCheckoutSession(params)
+} catch (error) {
+  if (error instanceof StorefrontError && error.errorCode === ErrorCodes.STOREFRONT_NOT_WHITELISTED) {
+    // Configuration, not a blip: alert yourself and show the payer a "try later" page.
+  }
+}
+```
+
+`StorefrontError` extends `ApiError` (with `httpStatus` and `errorCode`), so an existing `ApiError`
+branch still catches it. These are never retried, by `createCheckoutSessionWithRetry` or by you.
 
 ### Recovering from a replay refusal
 

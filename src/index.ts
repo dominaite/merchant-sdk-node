@@ -6,14 +6,23 @@ export {
   ChargeError,
   CheckoutRefusedError,
   DominaiteError,
+  ErrorCodes,
   RateLimitError,
   REVOKE_ERROR_CODES,
   RevokeError,
   SESSION_REFUSAL_ERROR_CODES,
+  STOREFRONT_ERROR_CODES,
+  StorefrontError,
   TransportError,
   VALIDATION_ERROR_CODES,
 } from './errors.js'
-export type { ChargeErrorCode, RevokeErrorCode, SessionRefusalErrorCode, ValidationErrorCode } from './errors.js'
+export type {
+  ChargeErrorCode,
+  RevokeErrorCode,
+  SessionRefusalErrorCode,
+  StorefrontErrorCode,
+  ValidationErrorCode,
+} from './errors.js'
 export { orderIdempotencyKey } from './idempotency.js'
 export type { OrderIdempotencyKeyInput } from './idempotency.js'
 export { signRequest } from './signing.js'

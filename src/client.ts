@@ -6,6 +6,9 @@ import {
   DominaiteError,
   RateLimitError,
   RevokeError,
+  STOREFRONT_ERROR_CODES,
+  StorefrontError,
+  type StorefrontErrorCode,
   TransportError,
 } from './errors.js'
 import { countCodePoints, MAX_FIELD_CODE_POINTS, normalizeIdempotencyKey } from './idempotency.js'
@@ -139,9 +142,11 @@ export class DominaiteClient {
    *
    * Throws AuthenticationError (wrong credentials, bad signature, clock off, IP not
    * allowlisted - fix config, do not retry), CheckoutRefusedError (the gateway refused;
-   * inspect errorCode), RateLimitError (429 - wait out retryAfterSeconds, then retry with
-   * the same key), ApiError (unexpected response), or TransportError (network or
-   * 5xx - safe to retry WITH the same idempotencyKey).
+   * inspect errorCode), StorefrontError (the website this session belongs to is not
+   * whitelisted, inactive or not the key's own - fix the storefront, do not retry),
+   * RateLimitError (429 - wait out retryAfterSeconds, then retry with the same key),
+   * ApiError (unexpected response), or TransportError (network or 5xx - safe to retry
+   * WITH the same idempotencyKey).
    */
   async createCheckoutSession(params: CreateCheckoutSessionParams): Promise<CheckoutSession> {
     const { idempotencyKey, body } = this.#prepareSessionRequest(params)
@@ -266,7 +271,8 @@ export class DominaiteClient {
    * error.charge.transactionId, never retry under a new key), CHARGE_FAILED (502, nothing
    * charged), PAYMENT_METHOD_NOT_ACTIVE or DUPLICATE_REQUEST (409), IDEMPOTENCY_KEY_REUSED
    * (422), PAYMENT_METHOD_CHARGES_DISABLED or PAYMENT_PROCESSING_UNAVAILABLE (503, retry
-   * later with the same key). Otherwise AuthenticationError, RateLimitError, ApiError
+   * later with the same key). A storefront refusal is a StorefrontError, as on sessions.
+   * Otherwise AuthenticationError, RateLimitError, ApiError
    * (404 for an id that is not yours, 400 validation) or TransportError (network - safe
    * to retry with the same key).
    */
@@ -289,7 +295,12 @@ export class DominaiteClient {
       return charge
     }
 
-    if (errorCode !== '' && reply.status >= 400 && !GENERIC_FAILURE_STATUSES.has(reply.status)) {
+    if (
+      errorCode !== '' &&
+      reply.status >= 400 &&
+      !GENERIC_FAILURE_STATUSES.has(reply.status) &&
+      !isStorefrontErrorCode(errorCode)
+    ) {
       throw new ChargeError(
         reply.status,
         errorCode,
@@ -505,11 +516,16 @@ function rejection(reply: Reply): DominaiteError {
   // Carry the machine-readable code: a validation rejection like
   // IDEMPOTENCY_KEY_REQUIRED is only actionable if the caller can branch on it.
   const errorCode = stringOr(reply.payload['errorCode'], stringOr(reply.error['code'], ''))
-  return new ApiError(
-    reply.status,
-    stringOr(reply.payload['errorMessage'], stringOr(reply.error['message'], 'Request rejected')),
-    errorCode === '' ? undefined : errorCode,
-  )
+  const message = stringOr(reply.payload['errorMessage'], stringOr(reply.error['message'], 'Request rejected'))
+  if (isStorefrontErrorCode(errorCode)) {
+    return new StorefrontError(reply.status, errorCode, message)
+  }
+  return new ApiError(reply.status, message, errorCode === '' ? undefined : errorCode)
+}
+
+/** Storefront refusals keep their own error on sessions and charges alike. */
+function isStorefrontErrorCode(code: string): code is StorefrontErrorCode {
+  return (STOREFRONT_ERROR_CODES as readonly string[]).includes(code)
 }
 
 /**

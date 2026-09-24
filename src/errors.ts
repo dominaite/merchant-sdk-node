@@ -23,6 +23,39 @@ export class AuthenticationError extends DominaiteError {
 }
 
 /**
+ * Named constants for the error codes you are most likely to branch on, so a typo is a
+ * compile error instead of a branch that never runs:
+ *
+ *   if (error instanceof StorefrontError && error.errorCode === ErrorCodes.STOREFRONT_NOT_WHITELISTED)
+ *
+ * The replay and availability codes arrive on {@link CheckoutRefusedError} (sessions) or
+ * {@link ChargeError} (charges); the storefront codes on {@link StorefrontError}.
+ */
+export const ErrorCodes = Object.freeze({
+  /** 409: the storefront's domain is not whitelisted at the payment provider yet. */
+  STOREFRONT_NOT_WHITELISTED: 'STOREFRONT_NOT_WHITELISTED',
+  /** 409: the storefront was deactivated or deleted. */
+  STOREFRONT_INACTIVE: 'STOREFRONT_INACTIVE',
+  /** 400: the storefront in the request does not match the one your API key is bound to. */
+  STOREFRONT_MISMATCH: 'STOREFRONT_MISMATCH',
+  ALREADY_PROCESSED: 'ALREADY_PROCESSED',
+  PRIOR_ATTEMPT_FAILED: 'PRIOR_ATTEMPT_FAILED',
+  DUPLICATE_REQUEST: 'DUPLICATE_REQUEST',
+  PAYMENT_PROCESSING_UNAVAILABLE: 'PAYMENT_PROCESSING_UNAVAILABLE',
+  IDEMPOTENCY_KEY_REUSED: 'IDEMPOTENCY_KEY_REUSED',
+} as const)
+
+/** The codes the SDK raises as a {@link StorefrontError}, on sessions and charges alike. */
+export const STOREFRONT_ERROR_CODES = [
+  'STOREFRONT_NOT_WHITELISTED',
+  'STOREFRONT_INACTIVE',
+  'STOREFRONT_MISMATCH',
+] as const
+
+/** One of the storefront codes this SDK knows about. */
+export type StorefrontErrorCode = (typeof STOREFRONT_ERROR_CODES)[number]
+
+/**
  * The gateway understood the request but refused to open a checkout session.
  * Branch on `errorCode`:
  * - PAYMENT_PROCESSING_UNAVAILABLE: card payments are off right now; retry later.
@@ -106,6 +139,25 @@ export class ApiError extends DominaiteError {
     super(message)
     this.httpStatus = httpStatus
     this.errorCode = errorCode
+  }
+}
+
+/**
+ * The gateway refused the request because of the storefront (website) it would be
+ * attributed to. A configuration problem, not a transient one: retrying does not help
+ * until the storefront is fixed on the Dominaite side. A subclass of {@link ApiError},
+ * so an existing `instanceof ApiError` branch still catches it. Branch on `errorCode`:
+ * - STOREFRONT_NOT_WHITELISTED (409): the site's domain is not whitelisted at the payment
+ *   provider yet. Ask Dominaite support to finish the whitelisting; nothing was created.
+ * - STOREFRONT_INACTIVE (409): the storefront was deactivated or deleted.
+ * - STOREFRONT_MISMATCH (400): the storefront in the request is not the one the API key is
+ *   bound to. Use the key issued for that website.
+ */
+export class StorefrontError extends ApiError {
+  declare readonly errorCode: StorefrontErrorCode
+
+  constructor(httpStatus: number, errorCode: StorefrontErrorCode, message: string) {
+    super(httpStatus, message, errorCode)
   }
 }
 
