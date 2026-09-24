@@ -291,22 +291,21 @@ const session = await client.createCheckoutSessionWithRetry(
 )
 ```
 
-**A retry is protection against a double charge, not a way to recover the first session.** The
-two outcomes of retrying a key differ:
+What a retry (or a page reload) of the same key gets back depends on where the first attempt got:
 
-- The first attempt never reached the gateway. The retry is an ordinary create and you get a
-  session back.
-- The first attempt did reach the gateway and took the key. The retry comes back HTTP 200 with
+- **It never reached the gateway.** The retry is an ordinary create and you get a new session.
+- **It reached the gateway and the session is still open and unexpired.** A clean replay (same
+  amount, currency and `saveCard`) returns the **original** session, `success: true`, with the
+  same `transactionId`, `cashierKey` and `cashierToken`. This is how a reload or a lost response
+  gets the payer back into the checkout they already had.
+- **The payment has moved on, or the body changed.** The retry comes back HTTP 200 with
   `success: false` and a replay code - `DUPLICATE_REQUEST`, `ALREADY_PROCESSED`,
   `PRIOR_ATTEMPT_FAILED` or `IDEMPOTENCY_KEY_REUSED` - which this SDK throws as
-  `CheckoutRefusedError`. The original session's `cashierKey` and `cashierToken` are **not**
-  returned, by that call or any other, so a payer who never got the widget cannot be handed the
-  first session.
+  `CheckoutRefusedError`.
 
-So write the timeout path to expect a refusal, not a session. When the refusal names a
+So the timeout path can get either a session or a refusal. When the refusal names a
 `transactionId`, read it back with `getStatus` to find out what the first attempt did (see
-"Recovering from a replay refusal" below). If it turns out the first attempt never became a
-payment you can pay, mint a new session under a **fresh** idempotency key.
+"Recovering from a replay refusal" below).
 
 ## Sessions expire
 
@@ -590,8 +589,9 @@ Refusal codes on `CheckoutRefusedError.errorCode`:
 
 - `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later with the same
   key. `createCheckoutSessionWithRetry` does this for you.
-- `DUPLICATE_REQUEST` - a session for this idempotency key is open, or expired within the last
-  few minutes; re-POST the same key shortly, never a fresh one.
+- `DUPLICATE_REQUEST` - the session for this key is still open but cannot be handed back right
+  now (still being created, or expired and not settled yet); re-POST the same key shortly, never a
+  fresh one.
 - `ALREADY_PROCESSED` - this idempotency key's payment already completed.
 - `PRIOR_ATTEMPT_FAILED` - a prior attempt with this key failed terminally; use a fresh key.
 - `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
@@ -654,9 +654,10 @@ try {
 `DUPLICATE_REQUEST` knows the key is taken but not yet by which row), so check it before use. The
 full refusal payload is on `error.result`.
 
-What you get back is the status of the earlier payment, not the earlier session: no refusal
-carries `cashierKey` or `cashierToken`, so there is no way to re-render the widget for a session
-you lost. Reconcile against the status, and start a fresh key when you need a payable session.
+A refusal carries the status of the earlier payment, not its session: no refusal has `cashierKey`
+or `cashierToken`. That is fine, because the one case where the session is still payable (open and
+unexpired) is not a refusal: the replay returns the original session itself. Reconcile refusals
+against the status.
 
 One replay is not a refusal at all. A session that expired unpaid is superseded: from a few
 minutes past `expiresAt`, re-POSTing the same key returns an ordinary success with a fresh session

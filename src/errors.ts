@@ -59,7 +59,9 @@ export type StorefrontErrorCode = (typeof STOREFRONT_ERROR_CODES)[number]
  * The gateway understood the request but refused to open a checkout session.
  * Branch on `errorCode`:
  * - PAYMENT_PROCESSING_UNAVAILABLE: card payments are off right now; retry later.
- * - DUPLICATE_REQUEST: a session for this idempotency key is already open.
+ * - DUPLICATE_REQUEST: the session for this key is still open but cannot be handed back
+ *   right now (still being created, or expired and not yet settled); retry the SAME key
+ *   shortly. A clean replay of an open session is not a refusal: it returns the session.
  * - ALREADY_PROCESSED: this idempotency key's payment already completed.
  * - PRIOR_ATTEMPT_FAILED: a prior attempt with this key failed terminally; use a fresh key.
  * - IDEMPOTENCY_KEY_REUSED: same key sent with a DIFFERENT body; use a fresh key.
@@ -285,8 +287,8 @@ export class RateLimitError extends DominaiteError {
  * Network-level failure or a 5xx - the request may or may not have reached the API.
  * Safe to retry WITH THE SAME idempotency key; a retried key never creates a second payment.
  *
- * "Safe" means no double charge, not "you get the first session back". If the earlier
- * attempt did reach the API, the retry is refused as a replay ({@link CheckoutRefusedError})
- * and the first session's cashier fields are gone for good.
+ * If the earlier attempt did reach the API and its session is still open, the retry gets
+ * that original session back. If the payment has moved on (paid, failed, expired), the
+ * retry is refused as a replay ({@link CheckoutRefusedError}) naming the transaction.
  */
 export class TransportError extends DominaiteError {}

@@ -31,5 +31,8 @@
 
 ### Changed
 
+- Docs: a clean replay of a still-open session returns the ORIGINAL session (same
+  `transactionId` and cashier fields), as the gateway does. The old text said a replay never
+  returns the session.
 - `createCheckoutSessionWithRetry` also retries `PAYMENT_PROCESSING_UNAVAILABLE` when it arrives
   as an HTTP 200 refusal, under the same key, like the 503 form it already retried.

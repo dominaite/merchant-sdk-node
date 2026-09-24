@@ -183,11 +183,12 @@ export class DominaiteClient {
    * is a 429: retrying into a limiter that just said stop makes it worse, so the
    * RateLimitError comes straight back with retryAfterSeconds for you to honour.
    *
-   * This buys you protection from a double charge, not recovery of the first session. If
-   * an earlier attempt did reach the gateway and take the key, the retry comes back as a
-   * replay refusal (CheckoutRefusedError: DUPLICATE_REQUEST, ALREADY_PROCESSED,
-   * PRIOR_ATTEMPT_FAILED, IDEMPOTENCY_KEY_REUSED) - the first session's cashier fields are
-   * not returned. Reconcile with getStatus(), then mint a new session under a fresh key.
+   * If an earlier attempt did reach the gateway and its session is still open and unexpired,
+   * the retry is a clean replay: the gateway answers with that ORIGINAL session (same
+   * transactionId and cashier fields), so a response lost to a timeout is recovered. Any
+   * other state comes back as a replay refusal (CheckoutRefusedError: DUPLICATE_REQUEST,
+   * ALREADY_PROCESSED, PRIOR_ATTEMPT_FAILED, IDEMPOTENCY_KEY_REUSED); reconcile those with
+   * getStatus(error.transactionId).
    */
   async createCheckoutSessionWithRetry(
     params: CreateCheckoutSessionParams,

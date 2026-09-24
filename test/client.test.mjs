@@ -1160,3 +1160,25 @@ test('when the attempts run out, the last PAYMENT_PROCESSING_UNAVAILABLE refusal
   )
   assert.equal(attempts, 2)
 })
+
+test('a clean replay after a lost response resolves with the ORIGINAL session', async () => {
+  // First attempt reaches the gateway but the response is lost; the retry under the same key
+  // is a clean replay of a still-open session, which the gateway answers with that session.
+  const calls = []
+  const fetchImpl = async (url, init) => {
+    calls.push(init)
+    if (calls.length === 1) throw new TypeError('fetch failed')
+    return jsonResponse(200, { success: true, checkout: CHECKOUT })
+  }
+
+  const session = await makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, {
+    attempts: 2,
+    baseDelayMs: 1,
+  })
+
+  assert.equal(session.transactionId, CHECKOUT.transactionId)
+  assert.equal(session.cashierKey, CHECKOUT.cashierKey)
+  assert.equal(session.cashierToken, CHECKOUT.cashierToken)
+  assert.equal(calls[0].headers['Idempotency-Key'], calls[1].headers['Idempotency-Key'])
+  assert.equal(calls[0].body, calls[1].body, 'a replay is only clean with the same body')
+})
