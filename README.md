@@ -206,6 +206,34 @@ Same API. Node's `require()` of this package resolves to the CJS build.
 floats and non-positive values before anything reaches the network. The amount is locked
 server-side - what you pass here is what gets charged; nothing in the browser can change it.
 
+How many digits the minor unit has depends on the currency (its ISO 4217 exponent). Most have two,
+but not all:
+
+| Exponent | Currencies | `25` of it in minor units |
+|---|---|---|
+| 2 | EUR, USD, GBP, BGN, RON, CHF, PLN, CZK, HUF, SEK, DKK, NOK | `2500` |
+| 0 | JPY, KRW, ISK | `25` |
+| 3 | BHD, KWD, OMR, JOD, TND | `25000` |
+
+`toMinorUnits` does the conversion from the decimal string your price list or database already
+holds, without floating point:
+
+```js
+import { toMinorUnits } from '@dominaite/merchant-sdk'
+
+toMinorUnits('25.00', 'EUR')   // 2500
+toMinorUnits('0.30', 'EUR')    // 30
+toMinorUnits('2500', 'JPY')    // 2500
+toMinorUnits('1.5', 'BHD')     // 1500
+
+toMinorUnits(0.1 + 0.2, 'EUR') // TypeError: pass a string, floats cannot hold prices exactly
+toMinorUnits('25.001', 'EUR')  // TypeError: EUR has 2 decimal places
+toMinorUnits('25.00', 'XYZ')   // TypeError: unknown currency, never a guessed default
+```
+
+It throws `TypeError` rather than rounding or guessing: a number instead of a string, more
+fractional digits than the currency has, or a currency missing from `CURRENCY_EXPONENTS`.
+
 ## Idempotency keys
 
 Every `createCheckoutSession` and `chargePaymentMethod` call needs an `idempotencyKey`. There is no

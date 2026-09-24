@@ -24,6 +24,7 @@ export type {
   ValidationErrorCode,
 } from './errors.js'
 export { orderIdempotencyKey } from './idempotency.js'
+export { CURRENCY_EXPONENTS, toMinorUnits } from './money.js'
 export type { OrderIdempotencyKeyInput } from './idempotency.js'
 export { signRequest } from './signing.js'
 export type { SignRequestInput } from './signing.js'
