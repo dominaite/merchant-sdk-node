@@ -76,6 +76,7 @@ test('createCheckoutSession() returns the checkout out of the contract success e
     amount: 8440,
     currency: 'EUR',
     orderReference: 'order-1042',
+    idempotencyKey: 'checkout-order-1042-8440-EUR',
   })
 
   assert.deepEqual(session, example.checkout)
@@ -98,6 +99,7 @@ test('the contract refusal example raises CheckoutRefusedError, not a session', 
       amount: 8440,
       currency: 'EUR',
       orderReference: 'order-1042',
+      idempotencyKey: 'checkout-order-1042-8440-EUR',
     }),
   )
 
@@ -131,6 +133,7 @@ test('every refusal code in the contract is recognised and carried through', asy
         amount: 8440,
         currency: 'EUR',
         orderReference: 'order-1042',
+        idempotencyKey: 'checkout-order-1042-8440-EUR',
       }),
     )
 
@@ -156,6 +159,7 @@ test('a validation code arrives as an ApiError 400 with the code intact', async 
           amount: 8440,
           currency: 'EUR',
           orderReference: 'order-1042',
+          idempotencyKey: 'checkout-order-1042-8440-EUR',
         }),
       )
 
@@ -252,6 +256,7 @@ test('chargePaymentMethod() returns the 201 charge out of the contract envelope'
     amount: 8440,
     currency: 'EUR',
     orderReference: 'order-1042',
+    idempotencyKey: 'checkout-order-1042-8440-EUR',
   })
 
   assert.deepEqual(charge, example.data)
@@ -275,6 +280,7 @@ test('chargePaymentMethod() returns the 402 decline as a charge with its decline
     amount: 8440,
     currency: 'EUR',
     orderReference: 'order-1042',
+    idempotencyKey: 'checkout-order-1042-8440-EUR',
   })
 
   assert.deepEqual(charge, example.data)
@@ -293,6 +299,7 @@ test('chargePaymentMethod() reads an absent declineClass and declineCode as null
     amount: 8440,
     currency: 'EUR',
     orderReference: 'order-1042',
+    idempotencyKey: 'checkout-order-1042-8440-EUR',
   })
 
   assert.deepEqual(charge, chargePaymentMethod.successExample.data)
@@ -312,6 +319,7 @@ test('every charge error example in the contract is a ChargeError with code, sta
           amount: 8440,
           currency: 'EUR',
           orderReference: 'order-1042',
+          idempotencyKey: 'checkout-order-1042-8440-EUR',
         }),
       )
 
@@ -348,6 +356,7 @@ test('CHARGE_OUTCOME_UNKNOWN carries the transaction to poll', async () => {
       amount: 8440,
       currency: 'EUR',
       orderReference: 'order-1042',
+      idempotencyKey: 'checkout-order-1042-8440-EUR',
     }),
   )
 
@@ -367,6 +376,7 @@ test('a charge against an unknown id is the generic ApiError 404 with the contra
       amount: 8440,
       currency: 'EUR',
       orderReference: 'order-1042',
+      idempotencyKey: 'checkout-order-1042-8440-EUR',
     }),
   )
 

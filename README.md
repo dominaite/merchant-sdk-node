@@ -98,7 +98,12 @@ signature on the wire in the clear, so the constructor throws a `TypeError` inst
 `create-session.mjs`:
 
 ```js
-import { CheckoutRefusedError, DominaiteClient, TransportError } from '@dominaite/merchant-sdk'
+import {
+  CheckoutRefusedError,
+  DominaiteClient,
+  orderIdempotencyKey,
+  TransportError,
+} from '@dominaite/merchant-sdk'
 
 const client = new DominaiteClient({
   keyId: process.env.DOMINAITE_KEY_ID,
@@ -111,6 +116,13 @@ try {
     amount: 2500,                    // minor units: 2500 = 25.00 EUR
     currency: 'EUR',
     orderReference: 'order-1042',    // your own order id, shows up in your dashboard
+    // Required. Same order + same amount = same key, so a reload replays this session.
+    idempotencyKey: orderIdempotencyKey({
+      scope: 'checkout',
+      orderId: 'order-1042',
+      amountMinor: 2500,
+      currency: 'EUR',
+    }),
     customer: {
       // Pass everything you already know - prefilled fields are hidden from the
       // payer, so the checkout form stays short.
@@ -194,40 +206,106 @@ Same API. Node's `require()` of this package resolves to the CJS build.
 floats and non-positive values before anything reaches the network. The amount is locked
 server-side - what you pass here is what gets charged; nothing in the browser can change it.
 
+How many digits the minor unit has depends on the currency, as the gateway counts it. Most have
+two, but not all:
+
+| Exponent | Currencies | `25` of it in minor units |
+|---|---|---|
+| 2 | EUR, USD, GBP, CAD, AUD, CHF, BGN, RON, PLN, CZK, SEK, DKK, NOK | `2500` |
+| 0 | JPY, HUF | `25` |
+| 3 | BHD, KWD | `25000` |
+
+**HUF is whole forints.** ISO 4217 gives the forint two decimals, but the gateway charges whole
+forints: 2500 HUF is `amount: 2500`, not `250000`. Converting with the ISO exponent charges 100
+times too much. ISK, KRW, OMR, JOD and TND are not supported by the helper, because ISO and the
+gateway disagree on them.
+
+`toMinorUnits` does the conversion from the decimal string your price list or database already
+holds, without floating point:
+
+```js
+import { toMinorUnits } from '@dominaite/merchant-sdk'
+
+toMinorUnits('25.00', 'EUR')   // 2500
+toMinorUnits('0.30', 'EUR')    // 30
+toMinorUnits('2500', 'JPY')    // 2500
+toMinorUnits('2500', 'HUF')    // 2500 (whole forints)
+toMinorUnits('1.5', 'BHD')     // 1500
+
+toMinorUnits(0.1 + 0.2, 'EUR') // TypeError: pass a string, floats cannot hold prices exactly
+toMinorUnits('25.001', 'EUR')  // TypeError: EUR has 2 decimal places
+toMinorUnits('25.000', 'EUR')  // TypeError too: extra zeros are not ignored
+toMinorUnits('25.00', 'XYZ')   // TypeError: unknown currency, never a guessed default
+```
+
+It throws `TypeError` rather than rounding or guessing: a number instead of a string, more
+fractional digits than the currency has (zeros included), an unsupported currency, or a currency
+missing from `CURRENCY_EXPONENTS`.
+
+## Idempotency keys
+
+Every `createCheckoutSession` and `chargePaymentMethod` call needs an `idempotencyKey`. There is no
+default: a missing or empty key throws `TypeError` before anything is sent. A key the SDK made up
+would be different on every attempt, which is the double payment the key exists to stop.
+
+Derive the key from the order instead of generating one:
+
+```js
+import { orderIdempotencyKey } from '@dominaite/merchant-sdk'
+
+orderIdempotencyKey({ scope: 'checkout', orderId: 'order-1042', amountMinor: 2500, currency: 'eur' })
+// 'checkout-order-1042-2500-EUR'
+```
+
+- **Same order, same amount, same key.** A page reload, the back button or a retry after a timeout
+  sends the key again and replays the same session instead of opening a second payment.
+- **Changed amount, new key.** If the basket changes, the amount (or currency) in the key changes
+  with it and you get a fresh session. Reusing the old key with a new amount would be refused
+  with `IDEMPOTENCY_KEY_REUSED`.
+- `scope` keeps different kinds of request for one order apart (`checkout`, `charge`, ...).
+- A key is 1 to 100 visible ASCII characters (`0x21` to `0x7E`): no spaces, no accented or
+  Cyrillic letters. The helper throws `TypeError` if `scope` and `orderId` break that (slug the
+  order id first), or if an input is malformed. `amountMinor` is the integer you send as `amount`.
+
 ## Retries and double-charges
 
-Every `createCheckoutSession` call carries an idempotency key (auto-generated, or pass your own as
-`idempotencyKey`). Retrying with the same key never opens a second payment - on a timeout, retry
-with the same key rather than generating a new one.
+Retrying with the same key never opens a second payment - on a timeout, retry with the same key
+rather than generating a new one.
 
-`createCheckoutSessionWithRetry` does that for you: it pins one key up front and reuses it across
-attempts, retrying only `TransportError` (network failures and 5xx, including
-`MERCHANT_API_UNAVAILABLE`). Refusals and authentication failures are not retried - they will not
-change.
+`createCheckoutSessionWithRetry` does that for you: it sends your key unchanged on every attempt,
+retrying `TransportError` (network failures and 5xx, including `MERCHANT_API_UNAVAILABLE`) and
+`PAYMENT_PROCESSING_UNAVAILABLE`, whether it arrives as a 503 or as an HTTP 200 refusal. Other
+refusals and authentication failures are not retried - they will not change.
 
 ```js
 const session = await client.createCheckoutSessionWithRetry(
-  { amount: 2500, currency: 'EUR', orderReference: 'order-1042' },
+  {
+    amount: 2500,
+    currency: 'EUR',
+    orderReference: 'order-1042',
+    idempotencyKey: orderIdempotencyKey({
+      scope: 'checkout', orderId: 'order-1042', amountMinor: 2500, currency: 'EUR',
+    }),
+  },
   { attempts: 3, baseDelayMs: 500 },   // both optional; delay doubles per attempt
 )
 ```
 
-**A retry is protection against a double charge, not a way to recover the first session.** The
-two outcomes of retrying a key differ:
+What a retry (or a page reload) of the same key gets back depends on where the first attempt got:
 
-- The first attempt never reached the gateway. The retry is an ordinary create and you get a
-  session back.
-- The first attempt did reach the gateway and took the key. The retry comes back HTTP 200 with
+- **It never reached the gateway.** The retry is an ordinary create and you get a new session.
+- **It reached the gateway and the session is still open and unexpired.** A clean replay (same
+  amount, currency and `saveCard`) returns the **original** session, `success: true`, with the
+  same `transactionId`, `cashierKey` and `cashierToken`. This is how a reload or a lost response
+  gets the payer back into the checkout they already had.
+- **The payment has moved on, or the body changed.** The retry comes back HTTP 200 with
   `success: false` and a replay code - `DUPLICATE_REQUEST`, `ALREADY_PROCESSED`,
   `PRIOR_ATTEMPT_FAILED` or `IDEMPOTENCY_KEY_REUSED` - which this SDK throws as
-  `CheckoutRefusedError`. The original session's `cashierKey` and `cashierToken` are **not**
-  returned, by that call or any other, so a payer who never got the widget cannot be handed the
-  first session.
+  `CheckoutRefusedError`.
 
-So write the timeout path to expect a refusal, not a session. When the refusal names a
+So the timeout path can get either a session or a refusal. When the refusal names a
 `transactionId`, read it back with `getStatus` to find out what the first attempt did (see
-"Recovering from a replay refusal" below). If it turns out the first attempt never became a
-payment you can pay, mint a new session under a **fresh** idempotency key.
+"Recovering from a replay refusal" below).
 
 ## Sessions expire
 
@@ -251,6 +329,7 @@ const session = await client.createCheckoutSession({
   amount: 2500,
   currency: 'EUR',
   orderReference: 'sub-8817-first',
+  idempotencyKey: 'sub-8817-first',
   saveCard: true,
 })
 // ... the payer completes the hosted checkout ...
@@ -472,6 +551,21 @@ awaiting capture. Never treat it as an abandoned order.
 Treat any status you do not recognise as still-open as well: a value the API adds later should
 make you keep polling, never silently close an order that is still live.
 
+`isPaid` and `isTerminal` encode those rules so your sweep does not have to:
+
+```js
+import { isPaid, isTerminal } from '@dominaite/merchant-sdk'
+
+const { status } = await client.getStatus(order.transactionId)
+if (isPaid(status)) {
+  await fulfil(order)            // succeeded, and only succeeded
+} else if (isTerminal(status)) {
+  await close(order, status)     // failed, cancelled, abandoned, refunded, partially_refunded
+}
+// Anything else (pending, processing, requires_capture, disputed, or a value this SDK
+// does not know yet) is still open: poll again later.
+```
+
 Poll after the payer returns to you, or on your order timeout - not in a tight loop; the endpoint
 is rate limited per key. The platform allows 60 requests a minute per API key and 120 a minute per
 IP; going over throws `RateLimitError`, which carries `retryAfterSeconds`.
@@ -483,21 +577,62 @@ Everything thrown by the SDK extends `DominaiteError`.
 | Error | When | What to do |
 |---|---|---|
 | `CheckoutRefusedError` | The API answered, `success: false`. `errorCode` carries the reason. | Branch on `errorCode`. Do not blind-retry. |
+| `StorefrontError` | 409 or 400 about the website the payment belongs to. `errorCode` is a storefront code, see below. Extends `ApiError`. | Fix the storefront setup. Retrying does not help. |
 | `AuthenticationError` | 401/403. `errorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `RateLimitError` | 429. You went over 60 requests/min for the key or 120/min for the IP. `retryAfterSeconds` carries `Retry-After` when it was a whole number of seconds, else `null`. | Wait `retryAfterSeconds` (or your own backoff), then send it again with the **same** idempotency key. The SDK does not retry this for you. |
 | `TransportError` | Network failure, timeout, 5xx (`MERCHANT_API_UNAVAILABLE`), or a response body over 10MB. | Retry with the **same** idempotency key, and expect a replay refusal if the first attempt did land. |
 | `ApiError` | Any other rejecting or unexpected response; `httpStatus` carries the code. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. |
 | `ApiError` with a 3xx `httpStatus` | The host you called answered with a redirect. | The Dominaite API never redirects, so the SDK refuses to follow one: your signed headers would be handed to whatever `Location` names, and its answer would look authentic. Check `baseUrl` and any proxy in front of it. |
-| `TypeError` | Bad arguments (float amount, missing field, malformed key id). | Fix the call; nothing was sent. |
+| `TypeError` | Bad arguments (float amount, missing field or idempotency key, malformed key id). | Fix the call; nothing was sent. |
 
 Refusal codes on `CheckoutRefusedError.errorCode`:
 
-- `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later.
-- `DUPLICATE_REQUEST` - a session for this idempotency key is open, or expired within the last
-  few minutes; re-POST the same key shortly, never a fresh one.
+- `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later with the same
+  key. `createCheckoutSessionWithRetry` does this for you.
+- `DUPLICATE_REQUEST` - the session for this key is still open but cannot be handed back right
+  now (still being created, or expired and not settled yet); re-POST the same key shortly, never a
+  fresh one.
 - `ALREADY_PROCESSED` - this idempotency key's payment already completed.
 - `PRIOR_ATTEMPT_FAILED` - a prior attempt with this key failed terminally; use a fresh key.
 - `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
+
+Every code above has a named constant on `ErrorCodes`, so a typo fails to compile instead of
+silently never matching:
+
+```js
+import { CheckoutRefusedError, ErrorCodes } from '@dominaite/merchant-sdk'
+
+if (error instanceof CheckoutRefusedError && error.errorCode === ErrorCodes.ALREADY_PROCESSED) {
+  // ...
+}
+```
+
+### Storefront errors
+
+If you run more than one website under one merchant account, every session and charge is
+attributed to a storefront (one website). When the gateway cannot use that storefront it refuses
+the request before anything is created, and the SDK throws `StorefrontError`:
+
+| `errorCode` | HTTP | Meaning | What to do |
+|---|---|---|---|
+| `STOREFRONT_NOT_WHITELISTED` | 409 | The site's domain is not whitelisted at the payment provider yet. Usually a new website. | Ask Dominaite support to finish the whitelisting. |
+| `STOREFRONT_INACTIVE` | 409 | The storefront was deactivated or deleted. | Use the key for an active site, or ask Dominaite support to reactivate it. |
+| `STOREFRONT_MISMATCH` | 400 | The storefront in the request is not the one your API key is bound to. | Use the API key issued for that website. |
+
+```js
+import { ErrorCodes, StorefrontError } from '@dominaite/merchant-sdk'
+
+try {
+  session = await client.createCheckoutSession(params)
+} catch (error) {
+  if (error instanceof StorefrontError && error.errorCode === ErrorCodes.STOREFRONT_NOT_WHITELISTED) {
+    // Configuration, not a blip: alert yourself and show the payer a "try later" page.
+  }
+}
+```
+
+`StorefrontError` extends `ApiError` (with `httpStatus` and `errorCode`), so an existing `ApiError`
+branch still catches it. These are never retried, by `createCheckoutSessionWithRetry` or by you.
 
 ### Recovering from a replay refusal
 
@@ -519,9 +654,10 @@ try {
 `DUPLICATE_REQUEST` knows the key is taken but not yet by which row), so check it before use. The
 full refusal payload is on `error.result`.
 
-What you get back is the status of the earlier payment, not the earlier session: no refusal
-carries `cashierKey` or `cashierToken`, so there is no way to re-render the widget for a session
-you lost. Reconcile against the status, and start a fresh key when you need a payable session.
+A refusal carries the status of the earlier payment, not its session: no refusal has `cashierKey`
+or `cashierToken`. That is fine, because the one case where the session is still payable (open and
+unexpired) is not a refusal: the replay returns the original session itself. Reconcile refusals
+against the status.
 
 One replay is not a refusal at all. A session that expired unpaid is superseded: from a few
 minutes past `expiresAt`, re-POSTing the same key returns an ordinary success with a fresh session

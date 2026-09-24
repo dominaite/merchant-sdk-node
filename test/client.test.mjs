@@ -7,8 +7,12 @@ import {
   ChargeError,
   CheckoutRefusedError,
   DominaiteClient,
+  ErrorCodes,
   RateLimitError,
   RevokeError,
+  SESSION_REFUSAL_ERROR_CODES,
+  STOREFRONT_ERROR_CODES,
+  StorefrontError,
   TransportError,
   signRequest,
 } from '../dist/esm/index.js'
@@ -315,16 +319,27 @@ test('the retry helper reuses the SAME idempotency key across attempts', async (
     return jsonResponse(200, { success: true, checkout: CHECKOUT })
   }
 
-  const session = await makeClient(fetchImpl).createCheckoutSessionWithRetry(
-    { amount: 2500, currency: 'EUR', orderReference: 'order-1042' },
-    { attempts: 3, baseDelayMs: 1 },
-  )
+  const session = await makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, {
+    attempts: 3,
+    baseDelayMs: 1,
+  })
 
   assert.deepEqual(session, CHECKOUT)
   assert.equal(calls.length, 3)
   const keys = new Set(calls.map((init) => init.headers['Idempotency-Key']))
-  assert.equal(keys.size, 1, `expected one idempotency key across retries, got ${[...keys].join(', ')}`)
-  assert.ok([...keys][0])
+  assert.deepEqual([...keys], [SESSION_PARAMS.idempotencyKey])
+})
+
+test('a session without an idempotency key is refused before anything is sent', async () => {
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+  const client = makeClient(fetchImpl)
+  const { idempotencyKey: _omitted, ...withoutKey } = SESSION_PARAMS
+
+  for (const params of [withoutKey, { ...withoutKey, idempotencyKey: null }, { ...withoutKey, idempotencyKey: '' }]) {
+    await assert.rejects(() => client.createCheckoutSession(params), TypeError)
+    await assert.rejects(() => client.createCheckoutSessionWithRetry(params, { baseDelayMs: 1 }), TypeError)
+  }
+  assert.equal(calls.length, 0)
 })
 
 test('the retry helper does not retry refusals', async () => {
@@ -540,22 +555,35 @@ test('a 100-character Cyrillic orderReference passes validation', async () => {
   assert.equal(calls.length, 1, 'a 100-code-point reference must reach the network')
 })
 
-test('a 100-code-point idempotency key passes, and 101 does not', async () => {
+test('an idempotency key is 1 to 100 visible ASCII characters', async () => {
   const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
   const client = makeClient(fetchImpl)
 
-  await client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey: 'ключ'.repeat(25) })
-  assert.equal(calls.length, 1)
+  await client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey: 'k'.repeat(100) })
+  // Every visible ASCII character, 0x21 to 0x7E, is allowed.
+  const visible = Array.from({ length: 0x7e - 0x21 + 1 }, (_, i) => String.fromCharCode(0x21 + i)).join('')
+  await client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey: visible })
+  assert.equal(calls.length, 2)
 
-  await assert.rejects(
-    () => client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey: `${'ключ'.repeat(25)}я` }),
-    TypeError,
-  )
+  for (const idempotencyKey of ['k'.repeat(101), 'ключ', 'order 1042', 'order\t1042', 'order-1042\n', 'caf\u00e9', '\u007f']) {
+    await assert.rejects(
+      () => client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey }),
+      TypeError,
+      JSON.stringify(idempotencyKey),
+    )
+    await assert.rejects(
+      () => client.chargePaymentMethod(PAYMENT_METHOD_ID, { ...CHARGE_PARAMS, idempotencyKey }),
+      TypeError,
+      JSON.stringify(idempotencyKey),
+    )
+  }
+  assert.equal(calls.length, 2, 'a refused key must never reach the network')
+
   await assert.rejects(
     () => client.createCheckoutSession({ ...SESSION_PARAMS, orderReference: 'з'.repeat(101) }),
     TypeError,
   )
-  assert.equal(calls.length, 1, 'over-length fields must never reach the network')
+  assert.equal(calls.length, 2, 'over-length fields must never reach the network')
 })
 
 test('orderReference must be a non-empty string', async () => {
@@ -790,13 +818,22 @@ test('chargePaymentMethod signs the charge vector byte-for-byte', async () => {
   assert.equal(signRequest({ ...CHARGE_VECTOR, timestamp: CHARGE_VECTOR.timestamp }), CHARGE_VECTOR.signature)
 })
 
-test('chargePaymentMethod generates an idempotency key when none is given, and sends description', async () => {
+test('a charge without an idempotency key is refused before anything is sent', async () => {
   const { fetchImpl, calls } = recordingFetch(placed())
+  const client = makeClient(fetchImpl)
   const { idempotencyKey: _omitted, ...withoutKey } = CHARGE_PARAMS
-  await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, { ...withoutKey, description: 'Monthly plan' })
+
+  for (const params of [withoutKey, { ...withoutKey, idempotencyKey: null }, { ...withoutKey, idempotencyKey: '' }]) {
+    await assert.rejects(() => client.chargePaymentMethod(PAYMENT_METHOD_ID, params), TypeError)
+  }
+  assert.equal(calls.length, 0)
+})
+
+test('chargePaymentMethod sends description in the body', async () => {
+  const { fetchImpl, calls } = recordingFetch(placed())
+  await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, { ...CHARGE_PARAMS, description: 'Monthly plan' })
 
   const { init } = calls[0]
-  assert.match(init.headers['Idempotency-Key'], /^[0-9a-f-]{36}$/)
   assert.deepEqual(JSON.parse(init.body), {
     amount: 2500, currency: 'EUR', orderReference: 'order-1043', description: 'Monthly plan',
   })
@@ -955,4 +992,193 @@ test('revokePaymentMethod resolves on a 204 for an already revoked method too', 
   await client.revokePaymentMethod(PAYMENT_METHOD_ID)
   await client.revokePaymentMethod(PAYMENT_METHOD_ID)
   assert.equal(calls.length, 2)
+})
+
+// Storefront refusals: the website a session or charge would be attributed to is not
+// whitelisted, inactive, or not the one the key is bound to. A config problem, never retried.
+
+const STOREFRONT_REFUSALS = [
+  { code: 'STOREFRONT_NOT_WHITELISTED', status: 409 },
+  { code: 'STOREFRONT_INACTIVE', status: 409 },
+  { code: 'STOREFRONT_MISMATCH', status: 400 },
+]
+
+test('a 409 STOREFRONT_NOT_WHITELISTED is a StorefrontError the caller can match on its code', async () => {
+  const { fetchImpl } = recordingFetch({
+    status: 409,
+    body: {
+      success: false,
+      error: {
+        code: 'STOREFRONT_NOT_WHITELISTED',
+        message: "This storefront's domain is not yet whitelisted with the payment provider",
+      },
+    },
+  })
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    (error) => {
+      assert.ok(error instanceof StorefrontError)
+      assert.ok(error instanceof ApiError, 'an existing ApiError branch must still catch it')
+      assert.ok(!(error instanceof CheckoutRefusedError))
+      assert.ok(!(error instanceof TransportError))
+      assert.equal(error.httpStatus, 409)
+      assert.equal(error.errorCode, ErrorCodes.STOREFRONT_NOT_WHITELISTED)
+      assert.equal(error.message, "This storefront's domain is not yet whitelisted with the payment provider")
+      return true
+    },
+  )
+})
+
+test('every storefront code is a StorefrontError on sessions, in both wire forms', async () => {
+  for (const { code, status } of STOREFRONT_REFUSALS) {
+    for (const body of [{ success: false, error: { code, message: 'refused' } }, { errorCode: code, errorMessage: 'refused' }]) {
+      const { fetchImpl } = recordingFetch({ status, body })
+      await assert.rejects(
+        () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+        (error) => {
+          assert.ok(error instanceof StorefrontError, `${code} must be a StorefrontError`)
+          assert.equal(error.httpStatus, status)
+          assert.equal(error.errorCode, code)
+          return true
+        },
+      )
+    }
+  }
+  assert.deepEqual([...STOREFRONT_ERROR_CODES].sort(), STOREFRONT_REFUSALS.map((entry) => entry.code).sort())
+})
+
+test('the retry helper does not retry a storefront refusal', async () => {
+  let attempts = 0
+  const fetchImpl = async () => {
+    attempts++
+    return jsonResponse(409, { success: false, error: { code: 'STOREFRONT_NOT_WHITELISTED', message: 'refused' } })
+  }
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, { attempts: 3, baseDelayMs: 1 }),
+    StorefrontError,
+  )
+  assert.equal(attempts, 1)
+})
+
+test('a storefront refusal on a charge is a StorefrontError, not a ChargeError', async () => {
+  const { fetchImpl } = recordingFetch({
+    status: 409,
+    body: { success: false, error: { code: 'STOREFRONT_INACTIVE', message: 'This storefront is inactive' } },
+  })
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS),
+    (error) => {
+      assert.ok(error instanceof StorefrontError)
+      assert.ok(!(error instanceof ChargeError))
+      assert.equal(error.errorCode, ErrorCodes.STOREFRONT_INACTIVE)
+      return true
+    },
+  )
+})
+
+test('ErrorCodes names each code as itself and cannot be changed at runtime', () => {
+  for (const [name, value] of Object.entries(ErrorCodes)) {
+    assert.equal(value, name)
+  }
+  assert.deepEqual(Object.keys(ErrorCodes).sort(), [
+    'ALREADY_PROCESSED',
+    'DUPLICATE_REQUEST',
+    'IDEMPOTENCY_KEY_REUSED',
+    'PAYMENT_PROCESSING_UNAVAILABLE',
+    'PRIOR_ATTEMPT_FAILED',
+    'STOREFRONT_INACTIVE',
+    'STOREFRONT_MISMATCH',
+    'STOREFRONT_NOT_WHITELISTED',
+  ])
+  assert.ok(Object.isFrozen(ErrorCodes))
+  // The replay and availability constants are the refusal codes a session actually raises.
+  for (const code of ['ALREADY_PROCESSED', 'PRIOR_ATTEMPT_FAILED', 'DUPLICATE_REQUEST', 'PAYMENT_PROCESSING_UNAVAILABLE', 'IDEMPOTENCY_KEY_REUSED']) {
+    assert.ok(SESSION_REFUSAL_ERROR_CODES.includes(ErrorCodes[code]))
+  }
+})
+
+test('the retry helper retries a 503 carrying PAYMENT_PROCESSING_UNAVAILABLE with the SAME key', async () => {
+  // A 503 is the gateway being unavailable whatever code it carries; the code must not
+  // turn it into a refusal the helper gives up on.
+  for (const unavailable of [
+    { success: false, error: { code: 'PAYMENT_PROCESSING_UNAVAILABLE', message: 'Card payments are unavailable' } },
+    { success: false, errorCode: 'PAYMENT_PROCESSING_UNAVAILABLE', errorMessage: 'Card payments are unavailable' },
+  ]) {
+    const calls = []
+    const fetchImpl = async (url, init) => {
+      calls.push(init)
+      return calls.length < 3 ? jsonResponse(503, unavailable) : jsonResponse(200, { success: true, checkout: CHECKOUT })
+    }
+
+    const session = await makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, {
+      attempts: 3,
+      baseDelayMs: 1,
+    })
+
+    assert.deepEqual(session, CHECKOUT)
+    assert.equal(calls.length, 3)
+    assert.deepEqual([...new Set(calls.map((init) => init.headers['Idempotency-Key']))], [SESSION_PARAMS.idempotencyKey])
+  }
+})
+
+test('the retry helper retries a 200 PAYMENT_PROCESSING_UNAVAILABLE refusal with the SAME key', async () => {
+  const calls = []
+  const fetchImpl = async (url, init) => {
+    calls.push(init)
+    return calls.length < 3
+      ? jsonResponse(200, { success: false, errorCode: 'PAYMENT_PROCESSING_UNAVAILABLE', errorMessage: 'Card payments are unavailable' })
+      : jsonResponse(200, { success: true, checkout: CHECKOUT })
+  }
+
+  const session = await makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, {
+    attempts: 3,
+    baseDelayMs: 1,
+  })
+
+  assert.deepEqual(session, CHECKOUT)
+  assert.equal(calls.length, 3)
+  assert.deepEqual([...new Set(calls.map((init) => init.headers['Idempotency-Key']))], [SESSION_PARAMS.idempotencyKey])
+})
+
+test('when the attempts run out, the last PAYMENT_PROCESSING_UNAVAILABLE refusal comes back as it arrived', async () => {
+  let attempts = 0
+  const fetchImpl = async () => {
+    attempts++
+    return jsonResponse(200, { success: false, errorCode: 'PAYMENT_PROCESSING_UNAVAILABLE' })
+  }
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, { attempts: 2, baseDelayMs: 1 }),
+    (error) => {
+      assert.ok(error instanceof CheckoutRefusedError)
+      assert.equal(error.errorCode, 'PAYMENT_PROCESSING_UNAVAILABLE')
+      return true
+    },
+  )
+  assert.equal(attempts, 2)
+})
+
+test('a clean replay after a lost response resolves with the ORIGINAL session', async () => {
+  // First attempt reaches the gateway but the response is lost; the retry under the same key
+  // is a clean replay of a still-open session, which the gateway answers with that session.
+  const calls = []
+  const fetchImpl = async (url, init) => {
+    calls.push(init)
+    if (calls.length === 1) throw new TypeError('fetch failed')
+    return jsonResponse(200, { success: true, checkout: CHECKOUT })
+  }
+
+  const session = await makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, {
+    attempts: 2,
+    baseDelayMs: 1,
+  })
+
+  assert.equal(session.transactionId, CHECKOUT.transactionId)
+  assert.equal(session.cashierKey, CHECKOUT.cashierKey)
+  assert.equal(session.cashierToken, CHECKOUT.cashierToken)
+  assert.equal(calls[0].headers['Idempotency-Key'], calls[1].headers['Idempotency-Key'])
+  assert.equal(calls[0].body, calls[1].body, 'a replay is only clean with the same body')
 })

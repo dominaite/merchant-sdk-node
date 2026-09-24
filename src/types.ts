@@ -30,10 +30,11 @@ export interface CreateCheckoutSessionParams {
    */
   saveCard?: boolean
   /**
-   * Auto-generated when omitted. Retrying with the same key never creates a
-   * second payment - on a timeout, retry with the same key.
+   * Required. Derive it from the order with orderIdempotencyKey(), never per attempt:
+   * the same key replays the same session, so a reload, a back button or a retry after
+   * a timeout never creates a second payment. A new amount needs a new key.
    */
-  idempotencyKey?: string
+  idempotencyKey: string
   /** Anything else the API accepts. */
   [key: string]: unknown
 }
@@ -149,10 +150,10 @@ export interface ChargePaymentMethodParams {
   orderReference: string
   description?: string
   /**
-   * Auto-generated when omitted. Retrying with the same key never charges the card
-   * twice - on a timeout, retry with the same key.
+   * Required. Derive it from what you are charging for (the order, the billing period),
+   * never per attempt: retrying with the same key never charges the card twice.
    */
-  idempotencyKey?: string
+  idempotencyKey: string
 }
 
 /**
