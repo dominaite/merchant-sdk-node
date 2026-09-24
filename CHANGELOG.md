@@ -21,6 +21,7 @@
   amount replays the same session; a changed amount gets a new key.
 - `ErrorCodes`: named constants for the storefront codes and the replay and availability codes.
 - `StorefrontError` and `STOREFRONT_ERROR_CODES`.
-- `toMinorUnits()` and `CURRENCY_EXPONENTS`: decimal string to integer minor units with the ISO 4217
-  exponent, no floating point, unknown currency is an error.
+- `toMinorUnits()` and `CURRENCY_EXPONENTS`: decimal string to integer minor units with the
+  gateway's exponent (HUF is whole forints, unlike ISO 4217), no floating point. An unknown
+  currency is an error, and ISK, KRW, OMR, JOD and TND are refused as not supported.
 - `isPaid()` and `isTerminal()` status helpers.

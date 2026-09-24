@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import { CURRENCY_EXPONENTS, toMinorUnits } from '../dist/esm/index.js'
 
 test('two-decimal currencies scale by 100', () => {
-  for (const currency of ['EUR', 'USD', 'GBP', 'BGN', 'RON', 'CHF', 'PLN', 'CZK', 'HUF', 'SEK', 'DKK', 'NOK']) {
+  for (const currency of ['EUR', 'USD', 'GBP', 'CAD', 'AUD', 'CHF', 'BGN', 'RON', 'PLN', 'CZK', 'SEK', 'DKK', 'NOK']) {
     assert.equal(toMinorUnits('25.00', currency), 2500, currency)
   }
   assert.equal(toMinorUnits('25', 'EUR'), 2500)
@@ -13,13 +13,26 @@ test('two-decimal currencies scale by 100', () => {
 })
 
 test('zero-decimal currencies are already minor units', () => {
-  for (const currency of ['JPY', 'KRW', 'ISK']) {
+  for (const currency of ['JPY', 'HUF']) {
     assert.equal(toMinorUnits('2500', currency), 2500, currency)
   }
 })
 
+test('HUF follows the gateway (whole forints), not ISO 4217, so it is never 100x too much', () => {
+  assert.equal(toMinorUnits('2500', 'HUF'), 2500)
+  assert.throws(() => toMinorUnits('2500.00', 'HUF'), TypeError)
+  assert.equal(CURRENCY_EXPONENTS.HUF, 0)
+})
+
+test('currencies where ISO and the gateway disagree are refused as not supported', () => {
+  for (const currency of ['ISK', 'KRW', 'OMR', 'JOD', 'TND', 'krw']) {
+    assert.throws(() => toMinorUnits('25', currency), /not supported/, currency)
+    assert.equal(Object.hasOwn(CURRENCY_EXPONENTS, currency.toUpperCase()), false, currency)
+  }
+})
+
 test('three-decimal currencies scale by 1000', () => {
-  for (const currency of ['BHD', 'KWD', 'OMR', 'JOD', 'TND']) {
+  for (const currency of ['BHD', 'KWD']) {
     assert.equal(toMinorUnits('1.5', currency), 1500, currency)
     assert.equal(toMinorUnits('1.234', currency), 1234, currency)
   }
@@ -38,8 +51,9 @@ test('0.30 EUR is exactly 30, with no float drift', () => {
   assert.equal(toMinorUnits('4.35', 'EUR'), 435)
 })
 
-test('more fractional digits than the currency has is refused', () => {
+test('more fractional digits than the currency has is refused, zeros included', () => {
   assert.throws(() => toMinorUnits('25.001', 'EUR'), TypeError)
+  assert.throws(() => toMinorUnits('25.000', 'EUR'), TypeError)
   assert.throws(() => toMinorUnits('100.5', 'JPY'), TypeError)
   assert.throws(() => toMinorUnits('100.0', 'JPY'), TypeError)
   assert.throws(() => toMinorUnits('1.2345', 'BHD'), TypeError)

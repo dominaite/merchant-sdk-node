@@ -206,14 +206,19 @@ Same API. Node's `require()` of this package resolves to the CJS build.
 floats and non-positive values before anything reaches the network. The amount is locked
 server-side - what you pass here is what gets charged; nothing in the browser can change it.
 
-How many digits the minor unit has depends on the currency (its ISO 4217 exponent). Most have two,
-but not all:
+How many digits the minor unit has depends on the currency, as the gateway counts it. Most have
+two, but not all:
 
 | Exponent | Currencies | `25` of it in minor units |
 |---|---|---|
-| 2 | EUR, USD, GBP, BGN, RON, CHF, PLN, CZK, HUF, SEK, DKK, NOK | `2500` |
-| 0 | JPY, KRW, ISK | `25` |
-| 3 | BHD, KWD, OMR, JOD, TND | `25000` |
+| 2 | EUR, USD, GBP, CAD, AUD, CHF, BGN, RON, PLN, CZK, SEK, DKK, NOK | `2500` |
+| 0 | JPY, HUF | `25` |
+| 3 | BHD, KWD | `25000` |
+
+**HUF is whole forints.** ISO 4217 gives the forint two decimals, but the gateway charges whole
+forints: 2500 HUF is `amount: 2500`, not `250000`. Converting with the ISO exponent charges 100
+times too much. ISK, KRW, OMR, JOD and TND are not supported by the helper, because ISO and the
+gateway disagree on them.
 
 `toMinorUnits` does the conversion from the decimal string your price list or database already
 holds, without floating point:
@@ -224,15 +229,18 @@ import { toMinorUnits } from '@dominaite/merchant-sdk'
 toMinorUnits('25.00', 'EUR')   // 2500
 toMinorUnits('0.30', 'EUR')    // 30
 toMinorUnits('2500', 'JPY')    // 2500
+toMinorUnits('2500', 'HUF')    // 2500 (whole forints)
 toMinorUnits('1.5', 'BHD')     // 1500
 
 toMinorUnits(0.1 + 0.2, 'EUR') // TypeError: pass a string, floats cannot hold prices exactly
 toMinorUnits('25.001', 'EUR')  // TypeError: EUR has 2 decimal places
+toMinorUnits('25.000', 'EUR')  // TypeError too: extra zeros are not ignored
 toMinorUnits('25.00', 'XYZ')   // TypeError: unknown currency, never a guessed default
 ```
 
 It throws `TypeError` rather than rounding or guessing: a number instead of a string, more
-fractional digits than the currency has, or a currency missing from `CURRENCY_EXPONENTS`.
+fractional digits than the currency has (zeros included), an unsupported currency, or a currency
+missing from `CURRENCY_EXPONENTS`.
 
 ## Idempotency keys
 
