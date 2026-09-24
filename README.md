@@ -98,7 +98,12 @@ signature on the wire in the clear, so the constructor throws a `TypeError` inst
 `create-session.mjs`:
 
 ```js
-import { CheckoutRefusedError, DominaiteClient, TransportError } from '@dominaite/merchant-sdk'
+import {
+  CheckoutRefusedError,
+  DominaiteClient,
+  orderIdempotencyKey,
+  TransportError,
+} from '@dominaite/merchant-sdk'
 
 const client = new DominaiteClient({
   keyId: process.env.DOMINAITE_KEY_ID,
@@ -111,6 +116,13 @@ try {
     amount: 2500,                    // minor units: 2500 = 25.00 EUR
     currency: 'EUR',
     orderReference: 'order-1042',    // your own order id, shows up in your dashboard
+    // Required. Same order + same amount = same key, so a reload replays this session.
+    idempotencyKey: orderIdempotencyKey({
+      scope: 'checkout',
+      orderId: 'order-1042',
+      amountMinor: 2500,
+      currency: 'EUR',
+    }),
     customer: {
       // Pass everything you already know - prefilled fields are hidden from the
       // payer, so the checkout form stays short.
@@ -194,20 +206,49 @@ Same API. Node's `require()` of this package resolves to the CJS build.
 floats and non-positive values before anything reaches the network. The amount is locked
 server-side - what you pass here is what gets charged; nothing in the browser can change it.
 
+## Idempotency keys
+
+Every `createCheckoutSession` and `chargePaymentMethod` call needs an `idempotencyKey`. There is no
+default: a missing or empty key throws `TypeError` before anything is sent. A key the SDK made up
+would be different on every attempt, which is the double payment the key exists to stop.
+
+Derive the key from the order instead of generating one:
+
+```js
+import { orderIdempotencyKey } from '@dominaite/merchant-sdk'
+
+orderIdempotencyKey({ scope: 'checkout', orderId: 'order-1042', amountMinor: 2500, currency: 'eur' })
+// 'checkout-order-1042-2500-EUR'
+```
+
+- **Same order, same amount, same key.** A page reload, the back button or a retry after a timeout
+  sends the key again and replays the same session instead of opening a second payment.
+- **Changed amount, new key.** If the basket changes, the amount (or currency) in the key changes
+  with it and you get a fresh session. Reusing the old key with a new amount would be refused
+  with `IDEMPOTENCY_KEY_REUSED`.
+- `scope` keeps different kinds of request for one order apart (`checkout`, `charge`, ...).
+- The key is at most 100 characters; the helper throws `TypeError` if `scope` and `orderId` make it
+  longer, or if an input is malformed. `amountMinor` is the integer you send as `amount`.
+
 ## Retries and double-charges
 
-Every `createCheckoutSession` call carries an idempotency key (auto-generated, or pass your own as
-`idempotencyKey`). Retrying with the same key never opens a second payment - on a timeout, retry
-with the same key rather than generating a new one.
+Retrying with the same key never opens a second payment - on a timeout, retry with the same key
+rather than generating a new one.
 
-`createCheckoutSessionWithRetry` does that for you: it pins one key up front and reuses it across
-attempts, retrying only `TransportError` (network failures and 5xx, including
+`createCheckoutSessionWithRetry` does that for you: it sends your key unchanged on every attempt, retrying only `TransportError` (network failures and 5xx, including
 `MERCHANT_API_UNAVAILABLE`). Refusals and authentication failures are not retried - they will not
 change.
 
 ```js
 const session = await client.createCheckoutSessionWithRetry(
-  { amount: 2500, currency: 'EUR', orderReference: 'order-1042' },
+  {
+    amount: 2500,
+    currency: 'EUR',
+    orderReference: 'order-1042',
+    idempotencyKey: orderIdempotencyKey({
+      scope: 'checkout', orderId: 'order-1042', amountMinor: 2500, currency: 'EUR',
+    }),
+  },
   { attempts: 3, baseDelayMs: 500 },   // both optional; delay doubles per attempt
 )
 ```
@@ -251,6 +292,7 @@ const session = await client.createCheckoutSession({
   amount: 2500,
   currency: 'EUR',
   orderReference: 'sub-8817-first',
+  idempotencyKey: 'sub-8817-first',
   saveCard: true,
 })
 // ... the payer completes the hosted checkout ...
@@ -488,7 +530,7 @@ Everything thrown by the SDK extends `DominaiteError`.
 | `TransportError` | Network failure, timeout, 5xx (`MERCHANT_API_UNAVAILABLE`), or a response body over 10MB. | Retry with the **same** idempotency key, and expect a replay refusal if the first attempt did land. |
 | `ApiError` | Any other rejecting or unexpected response; `httpStatus` carries the code. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. |
 | `ApiError` with a 3xx `httpStatus` | The host you called answered with a redirect. | The Dominaite API never redirects, so the SDK refuses to follow one: your signed headers would be handed to whatever `Location` names, and its answer would look authentic. Check `baseUrl` and any proxy in front of it. |
-| `TypeError` | Bad arguments (float amount, missing field, malformed key id). | Fix the call; nothing was sent. |
+| `TypeError` | Bad arguments (float amount, missing field or idempotency key, malformed key id). | Fix the call; nothing was sent. |
 
 Refusal codes on `CheckoutRefusedError.errorCode`:
 

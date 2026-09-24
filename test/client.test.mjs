@@ -315,16 +315,27 @@ test('the retry helper reuses the SAME idempotency key across attempts', async (
     return jsonResponse(200, { success: true, checkout: CHECKOUT })
   }
 
-  const session = await makeClient(fetchImpl).createCheckoutSessionWithRetry(
-    { amount: 2500, currency: 'EUR', orderReference: 'order-1042' },
-    { attempts: 3, baseDelayMs: 1 },
-  )
+  const session = await makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, {
+    attempts: 3,
+    baseDelayMs: 1,
+  })
 
   assert.deepEqual(session, CHECKOUT)
   assert.equal(calls.length, 3)
   const keys = new Set(calls.map((init) => init.headers['Idempotency-Key']))
-  assert.equal(keys.size, 1, `expected one idempotency key across retries, got ${[...keys].join(', ')}`)
-  assert.ok([...keys][0])
+  assert.deepEqual([...keys], [SESSION_PARAMS.idempotencyKey])
+})
+
+test('a session without an idempotency key is refused before anything is sent', async () => {
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+  const client = makeClient(fetchImpl)
+  const { idempotencyKey: _omitted, ...withoutKey } = SESSION_PARAMS
+
+  for (const params of [withoutKey, { ...withoutKey, idempotencyKey: null }, { ...withoutKey, idempotencyKey: '' }]) {
+    await assert.rejects(() => client.createCheckoutSession(params), TypeError)
+    await assert.rejects(() => client.createCheckoutSessionWithRetry(params, { baseDelayMs: 1 }), TypeError)
+  }
+  assert.equal(calls.length, 0)
 })
 
 test('the retry helper does not retry refusals', async () => {
@@ -790,13 +801,22 @@ test('chargePaymentMethod signs the charge vector byte-for-byte', async () => {
   assert.equal(signRequest({ ...CHARGE_VECTOR, timestamp: CHARGE_VECTOR.timestamp }), CHARGE_VECTOR.signature)
 })
 
-test('chargePaymentMethod generates an idempotency key when none is given, and sends description', async () => {
+test('a charge without an idempotency key is refused before anything is sent', async () => {
   const { fetchImpl, calls } = recordingFetch(placed())
+  const client = makeClient(fetchImpl)
   const { idempotencyKey: _omitted, ...withoutKey } = CHARGE_PARAMS
-  await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, { ...withoutKey, description: 'Monthly plan' })
+
+  for (const params of [withoutKey, { ...withoutKey, idempotencyKey: null }, { ...withoutKey, idempotencyKey: '' }]) {
+    await assert.rejects(() => client.chargePaymentMethod(PAYMENT_METHOD_ID, params), TypeError)
+  }
+  assert.equal(calls.length, 0)
+})
+
+test('chargePaymentMethod sends description in the body', async () => {
+  const { fetchImpl, calls } = recordingFetch(placed())
+  await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, { ...CHARGE_PARAMS, description: 'Monthly plan' })
 
   const { init } = calls[0]
-  assert.match(init.headers['Idempotency-Key'], /^[0-9a-f-]{36}$/)
   assert.deepEqual(JSON.parse(init.body), {
     amount: 2500, currency: 'EUR', orderReference: 'order-1043', description: 'Monthly plan',
   })

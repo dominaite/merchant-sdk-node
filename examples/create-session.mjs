@@ -6,7 +6,7 @@
 //   node examples/create-session.mjs
 //
 // Run `npm run build` first - this imports the built output.
-import { CheckoutRefusedError, DominaiteClient, TransportError } from '../dist/esm/index.js'
+import { CheckoutRefusedError, DominaiteClient, orderIdempotencyKey, TransportError } from '../dist/esm/index.js'
 
 const keyId = process.env.DOMINAITE_KEY_ID
 const secret = process.env.DOMINAITE_SECRET
@@ -22,11 +22,14 @@ const client = new DominaiteClient({
   ...(process.env.DOMINAITE_BASE_URL ? { baseUrl: process.env.DOMINAITE_BASE_URL } : {}),
 })
 
+const orderReference = `smoke-${Date.now()}`
+
 try {
   const session = await client.createCheckoutSession({
     amount: 2500,
     currency: 'EUR',
-    orderReference: `smoke-${Date.now()}`,
+    orderReference,
+    idempotencyKey: orderIdempotencyKey({ scope: 'checkout', orderId: orderReference, amountMinor: 2500, currency: 'EUR' }),
     customer: { firstName: 'Ana', lastName: 'Kirova', email: 'ana@example.com' },
   })
 

@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto'
-
 import {
   ApiError,
   AuthenticationError,
@@ -10,6 +8,7 @@ import {
   RevokeError,
   TransportError,
 } from './errors.js'
+import { countCodePoints, MAX_FIELD_CODE_POINTS, normalizeIdempotencyKey } from './idempotency.js'
 import { signRequest } from './signing.js'
 import type {
   ChargePaymentMethodParams,
@@ -39,8 +38,6 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const PAYMENT_METHOD_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/
 /** Hard ceiling on a response body. Past this the read is abandoned, not buffered. */
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024
-/** Maximum length of the fields the API caps at 100, counted in Unicode code points. */
-const MAX_FIELD_CODE_POINTS = 100
 /** Hosts allowed to be reached over plain http, for local development only. */
 const PLAINTEXT_ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 /**
@@ -80,6 +77,9 @@ interface Reply {
  *     amount: 2500,                  // minor units: 25.00 EUR
  *     currency: 'EUR',
  *     orderReference: 'order-1042',  // your own order id
+ *     idempotencyKey: orderIdempotencyKey({
+ *       scope: 'checkout', orderId: 'order-1042', amountMinor: 2500, currency: 'EUR',
+ *     }),
  *     customer: { firstName: 'Ana', lastName: 'Kirova', email: 'ana@example.com' },
  *   })
  *   // Hand session.cashierKey + session.cashierToken to the embed snippet.
@@ -133,6 +133,10 @@ export class DominaiteClient {
   /**
    * Creates a hosted checkout session for one payment.
    *
+   * idempotencyKey is required: derive it from the order with orderIdempotencyKey(), so a
+   * reload or a retry replays the same session instead of opening a second payment. A
+   * missing or empty key throws TypeError before anything is sent.
+   *
    * Throws AuthenticationError (wrong credentials, bad signature, clock off, IP not
    * allowlisted - fix config, do not retry), CheckoutRefusedError (the gateway refused;
    * inspect errorCode), RateLimitError (429 - wait out retryAfterSeconds, then retry with
@@ -161,9 +165,9 @@ export class DominaiteClient {
   }
 
   /**
-   * createCheckoutSession with retries on TransportError only, reusing THE SAME
-   * idempotency key across attempts - which is what makes the retry safe: the API
-   * never opens a second payment for a key it has already seen.
+   * createCheckoutSession with retries on TransportError only, sending your
+   * idempotency key unchanged on every attempt - which is what makes the retry safe:
+   * the API never opens a second payment for a key it has already seen.
    *
    * Refusals and authentication failures are not retried; they will not change. Neither
    * is a 429: retrying into a limiter that just said stop makes it worse, so the
@@ -185,17 +189,10 @@ export class DominaiteClient {
       throw new TypeError('attempts must be a positive integer')
     }
 
-    // Pin the key ONCE, before the first attempt. Generating a fresh key per attempt
-    // would make every retry a new payment.
-    const pinned: CreateCheckoutSessionParams = {
-      ...params,
-      idempotencyKey: params.idempotencyKey ?? randomUUID(),
-    }
-
     let lastError: TransportError | undefined
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
-        return await this.createCheckoutSession(pinned)
+        return await this.createCheckoutSession(params)
       } catch (error) {
         if (!(error instanceof TransportError)) {
           throw error
@@ -253,9 +250,10 @@ export class DominaiteClient {
    * Charges a card kept on file, off-session: no widget, no payer present.
    *
    * paymentMethodId is the id from getStatus().storedPaymentMethod of a session you
-   * created with saveCard. The charge is signed like a session and carries an
-   * Idempotency-Key (auto-generated unless you pass one), so retrying after a timeout
-   * WITH THE SAME KEY never charges the card twice; the gateway replays its first answer.
+   * created with saveCard. The charge is signed like a session and carries the
+   * Idempotency-Key you pass (required; derive it from the billing period or the order),
+   * so retrying after a timeout WITH THE SAME KEY never charges the card twice; the
+   * gateway replays its first answer.
    *
    * A decline is not an exception: the gateway answers HTTP 402 and this resolves with a
    * charge whose status is 'failed' plus a declineClass telling you whether to give up on
@@ -566,20 +564,6 @@ function validateMoneyParams(params: { amount: number; currency: string; orderRe
   }
 }
 
-function normalizeIdempotencyKey(providedKey: unknown): string {
-  const idempotencyKey = providedKey ?? randomUUID()
-  if (
-    typeof idempotencyKey !== 'string' ||
-    idempotencyKey === '' ||
-    countCodePoints(idempotencyKey) > MAX_FIELD_CODE_POINTS
-  ) {
-    throw new TypeError(
-      `idempotencyKey must be a non-empty string of at most ${MAX_FIELD_CODE_POINTS} characters`,
-    )
-  }
-  return idempotencyKey
-}
-
 function normalizePaymentMethodId(paymentMethodId: unknown): string {
   const normalized = String(paymentMethodId ?? '').trim()
   if (!PAYMENT_METHOD_ID_PATTERN.test(normalized)) {
@@ -681,24 +665,6 @@ function oversizedBody(): TransportError {
     `The Dominaite API response exceeded the ${MAX_RESPONSE_BYTES} byte limit and was not read. ` +
       'Check your baseUrl and any proxy in front of it, then retry with the same idempotency key.',
   )
-}
-
-/**
- * Length in Unicode CODE POINTS, which is what the API's own limits count - not UTF-16
- * units and not bytes. A 100-character Cyrillic order reference is 100 here and 200
- * bytes, and must not be rejected for it.
- *
- * Known caveat: an astral character (emoji, rarer CJK) counts as 1 here while the server
- * counts it as 2, so a string packed with them can pass this check and still be rejected
- * upstream. The server is the final arbiter; this check only catches the obvious cases
- * before they cost a round trip.
- */
-function countCodePoints(value: string): number {
-  let count = 0
-  for (const _ of value) {
-    count++
-  }
-  return count
 }
 
 /**

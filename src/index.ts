@@ -14,6 +14,8 @@ export {
   VALIDATION_ERROR_CODES,
 } from './errors.js'
 export type { ChargeErrorCode, RevokeErrorCode, SessionRefusalErrorCode, ValidationErrorCode } from './errors.js'
+export { orderIdempotencyKey } from './idempotency.js'
+export type { OrderIdempotencyKeyInput } from './idempotency.js'
 export { signRequest } from './signing.js'
 export type { SignRequestInput } from './signing.js'
 export { verifyWebhook } from './webhooks.js'
