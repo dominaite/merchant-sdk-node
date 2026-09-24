@@ -542,6 +542,21 @@ awaiting capture. Never treat it as an abandoned order.
 Treat any status you do not recognise as still-open as well: a value the API adds later should
 make you keep polling, never silently close an order that is still live.
 
+`isPaid` and `isTerminal` encode those rules so your sweep does not have to:
+
+```js
+import { isPaid, isTerminal } from '@dominaite/merchant-sdk'
+
+const { status } = await client.getStatus(order.transactionId)
+if (isPaid(status)) {
+  await fulfil(order)            // succeeded, and only succeeded
+} else if (isTerminal(status)) {
+  await close(order, status)     // failed, cancelled, abandoned, refunded, partially_refunded
+}
+// Anything else (pending, processing, requires_capture, disputed, or a value this SDK
+// does not know yet) is still open: poll again later.
+```
+
 Poll after the payer returns to you, or on your order timeout - not in a tight loop; the endpoint
 is rate limited per key. The platform allows 60 requests a minute per API key and 120 a minute per
 IP; going over throws `RateLimitError`, which carries `retryAfterSeconds`.

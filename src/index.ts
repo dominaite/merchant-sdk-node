@@ -28,6 +28,7 @@ export { CURRENCY_EXPONENTS, toMinorUnits } from './money.js'
 export type { OrderIdempotencyKeyInput } from './idempotency.js'
 export { signRequest } from './signing.js'
 export type { SignRequestInput } from './signing.js'
+export { isPaid, isTerminal } from './status.js'
 export { verifyWebhook } from './webhooks.js'
 export {
   CHARGE_STATUSES,
