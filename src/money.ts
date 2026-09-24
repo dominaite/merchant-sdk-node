@@ -63,7 +63,7 @@ export function toMinorUnits(amount: string, currency: string): number {
   }
   const exponent = Object.hasOwn(CURRENCY_EXPONENTS, code) ? CURRENCY_EXPONENTS[code] : undefined
   if (exponent === undefined) {
-    throw new TypeError(`Unknown currency ${String(currency)}: no ISO 4217 minor-unit exponent on file`)
+    throw new TypeError(`Unknown currency ${String(currency)}: no minor-unit exponent on record`)
   }
 
   if (typeof amount !== 'string') {

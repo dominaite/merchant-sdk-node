@@ -66,6 +66,19 @@ test('an unknown currency is an error, not a default of two decimals', () => {
   assert.throws(() => toMinorUnits('25.00', 'toString'), TypeError)
 })
 
+test('the unknown-currency error names the currency and does not cite ISO 4217', () => {
+  // The exponent table is the gateway's, not ISO's, so the message must not claim otherwise.
+  for (const currency of ['XYZ', 'NZD', 'TRY', 'RSD', 'MKD', 'UAH']) {
+    assert.throws(
+      () => toMinorUnits('25.00', currency),
+      (error) =>
+        error instanceof TypeError &&
+        error.message === `Unknown currency ${currency}: no minor-unit exponent on record`,
+      currency,
+    )
+  }
+})
+
 test('the currency code is case-insensitive', () => {
   assert.equal(toMinorUnits('25.00', 'eur'), 2500)
   assert.equal(toMinorUnits('2500', 'jpy'), 2500)
