@@ -14,7 +14,10 @@ import {
   REVOKE_ERROR_CODES,
   RevokeError,
   SESSION_REFUSAL_ERROR_CODES,
+  STORED_PAYMENT_METHOD_RETIRED_REASONS,
   STORED_PAYMENT_METHOD_STATUSES,
+  STOREFRONT_ERROR_CODES,
+  StorefrontError,
   TRANSACTION_STATUSES,
   TransportError,
   VALIDATION_ERROR_CODES,
@@ -29,6 +32,9 @@ import { VECTOR } from './vector.mjs'
 
 const CONTRACT = JSON.parse(
   readFileSync(fileURLToPath(new URL('./merchant-api-contract.json', import.meta.url)), 'utf8'),
+)
+const WIRE = JSON.parse(
+  readFileSync(fileURLToPath(new URL('./merchant-api-wire-contract.json', import.meta.url)), 'utf8'),
 )
 const DECLARATIONS = readFileSync(
   fileURLToPath(new URL('../dist/types/types.d.ts', import.meta.url)),
@@ -199,6 +205,57 @@ test('getStatus() carries every status in the vocabulary through untouched', asy
 test('the stored payment method exposes exactly the contract fields', () => {
   assert.deepEqual(declaredFields('StoredPaymentMethod'), CONTRACT.endpoints.getStatus.storedPaymentMethodFields)
   assert.deepEqual([...STORED_PAYMENT_METHOD_STATUSES], CONTRACT.storedPaymentMethodStatusVocabulary)
+  assert.deepEqual(
+    [...STORED_PAYMENT_METHOD_RETIRED_REASONS],
+    CONTRACT.storedPaymentMethodRetiredReasonVocabulary,
+  )
+})
+
+test('getStatus() reads the retired-card example as retired with its reason, in both wire forms', async () => {
+  const example = CONTRACT.endpoints.getStatus.retiredCardExample
+  for (const wire of [example, withoutNulls(example)]) {
+    const status = await makeClient(recordingFetch(wire).fetchImpl).getStatus(example.transactionId)
+
+    assert.equal(status.status, 'refunded')
+    assert.deepEqual(status.storedPaymentMethod, example.storedPaymentMethod)
+    assert.equal(status.storedPaymentMethod.status, 'retired')
+    assert.equal(status.storedPaymentMethod.retiredReason, 'source_sale_reversed')
+    assert.ok(STORED_PAYMENT_METHOD_RETIRED_REASONS.includes(status.storedPaymentMethod.retiredReason))
+  }
+})
+
+test('the storefront codes are exactly the contract, in order, and none is a session refusal', () => {
+  assert.deepEqual([...STOREFRONT_ERROR_CODES], CONTRACT.storefrontErrorCodes)
+  for (const code of CONTRACT.storefrontErrorCodes) {
+    assert.equal(SESSION_REFUSAL_ERROR_CODES.includes(code), false, code)
+  }
+})
+
+test('every storefront code comes back as a StorefrontError with its contract status and is never retried', async () => {
+  for (const { code, httpStatus, retry } of WIRE.errorCodes.storefront) {
+    assert.equal(retry, false, code)
+    const { fetchImpl, calls } = recordingFetch(
+      { success: false, error: { code, message: 'refused' } },
+      httpStatus,
+    )
+    const error = await rejects(() =>
+      makeClient(fetchImpl).createCheckoutSessionWithRetry(
+        {
+          amount: 8440,
+          currency: 'EUR',
+          orderReference: 'order-1042',
+          idempotencyKey: 'checkout-order-1042-8440-EUR',
+        },
+        { attempts: 3, baseDelayMs: 1 },
+      ),
+    )
+
+    assert.ok(error instanceof StorefrontError, `${code} must be a StorefrontError`)
+    assert.ok(!(error instanceof CheckoutRefusedError), `${code} is not a refusal`)
+    assert.equal(error.httpStatus, httpStatus, code)
+    assert.equal(error.errorCode, code)
+    assert.equal(calls.length, 1, `${code} must not be retried`)
+  }
 })
 
 test('the charge exposes exactly the contract fields and vocabularies', () => {
@@ -243,6 +300,7 @@ test('getStatus() reads an absent storedPaymentMethod as no card and absent card
     expiryMonth: null,
     expiryYear: null,
     status: 'active',
+    retiredReason: null,
   })
 })
 

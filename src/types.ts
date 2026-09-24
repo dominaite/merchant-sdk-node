@@ -113,11 +113,27 @@ export interface CheckoutStatus {
  * Every state a stored payment method can be in, in the gateway's own order.
  *
  * Only active methods can be charged. revoked is what {@link DominaiteClient.revokePaymentMethod}
- * leaves behind; expired means the card's expiry date has passed.
+ * leaves behind; expired means the card's expiry date has passed; retired means the platform
+ * stopped the card on its own (retiredReason says why) and it never becomes active again, so
+ * ask the customer to save a card again.
  */
-export const STORED_PAYMENT_METHOD_STATUSES = ['active', 'revoked', 'expired'] as const
+export const STORED_PAYMENT_METHOD_STATUSES = ['active', 'revoked', 'expired', 'retired'] as const
 
 export type StoredPaymentMethodStatus = (typeof STORED_PAYMENT_METHOD_STATUSES)[number]
+
+/**
+ * Why the platform retired a stored payment method, in the gateway's own order.
+ *
+ * hard_decline: a charge on it was declined as final. chargeback: a charge on it was
+ * disputed. source_sale_reversed: the payment that saved it was fully refunded or disputed.
+ */
+export const STORED_PAYMENT_METHOD_RETIRED_REASONS = [
+  'hard_decline',
+  'chargeback',
+  'source_sale_reversed',
+] as const
+
+export type StoredPaymentMethodRetiredReason = (typeof STORED_PAYMENT_METHOD_RETIRED_REASONS)[number]
 
 /**
  * A card kept on file. Never the card number, never the PSP token - only what you may
@@ -137,6 +153,11 @@ export interface StoredPaymentMethod {
   expiryYear: number | null
   /** Treat any value you do not recognise as not chargeable. */
   status: StoredPaymentMethodStatus | string
+  /**
+   * Set when the platform retired the card, and kept if you revoke it afterwards; null on
+   * every other card. Treat a value you do not recognise as retired for an unknown reason.
+   */
+  retiredReason: StoredPaymentMethodRetiredReason | string | null
   [key: string]: unknown
 }
 

@@ -33,6 +33,7 @@ export { verifyWebhook } from './webhooks.js'
 export {
   CHARGE_STATUSES,
   DECLINE_CLASSES,
+  STORED_PAYMENT_METHOD_RETIRED_REASONS,
   STORED_PAYMENT_METHOD_STATUSES,
   TRANSACTION_STATUSES,
 } from './types.js'
@@ -49,6 +50,7 @@ export type {
   Ping,
   RetryOptions,
   StoredPaymentMethod,
+  StoredPaymentMethodRetiredReason,
   StoredPaymentMethodStatus,
   TransactionStatus,
 } from './types.js'
