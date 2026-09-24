@@ -271,9 +271,10 @@ orderIdempotencyKey({ scope: 'checkout', orderId: 'order-1042', amountMinor: 250
 Retrying with the same key never opens a second payment - on a timeout, retry with the same key
 rather than generating a new one.
 
-`createCheckoutSessionWithRetry` does that for you: it sends your key unchanged on every attempt, retrying only `TransportError` (network failures and 5xx, including
-`MERCHANT_API_UNAVAILABLE`). Refusals and authentication failures are not retried - they will not
-change.
+`createCheckoutSessionWithRetry` does that for you: it sends your key unchanged on every attempt,
+retrying `TransportError` (network failures and 5xx, including `MERCHANT_API_UNAVAILABLE`) and
+`PAYMENT_PROCESSING_UNAVAILABLE`, whether it arrives as a 503 or as an HTTP 200 refusal. Other
+refusals and authentication failures are not retried - they will not change.
 
 ```js
 const session = await client.createCheckoutSessionWithRetry(
@@ -586,7 +587,8 @@ Everything thrown by the SDK extends `DominaiteError`.
 
 Refusal codes on `CheckoutRefusedError.errorCode`:
 
-- `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later.
+- `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later with the same
+  key. `createCheckoutSessionWithRetry` does this for you.
 - `DUPLICATE_REQUEST` - a session for this idempotency key is open, or expired within the last
   few minutes; re-POST the same key shortly, never a fresh one.
 - `ALREADY_PROCESSED` - this idempotency key's payment already completed.

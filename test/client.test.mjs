@@ -1110,3 +1110,40 @@ test('the retry helper retries a 503 carrying PAYMENT_PROCESSING_UNAVAILABLE wit
     assert.deepEqual([...new Set(calls.map((init) => init.headers['Idempotency-Key']))], [SESSION_PARAMS.idempotencyKey])
   }
 })
+
+test('the retry helper retries a 200 PAYMENT_PROCESSING_UNAVAILABLE refusal with the SAME key', async () => {
+  const calls = []
+  const fetchImpl = async (url, init) => {
+    calls.push(init)
+    return calls.length < 3
+      ? jsonResponse(200, { success: false, errorCode: 'PAYMENT_PROCESSING_UNAVAILABLE', errorMessage: 'Card payments are unavailable' })
+      : jsonResponse(200, { success: true, checkout: CHECKOUT })
+  }
+
+  const session = await makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, {
+    attempts: 3,
+    baseDelayMs: 1,
+  })
+
+  assert.deepEqual(session, CHECKOUT)
+  assert.equal(calls.length, 3)
+  assert.deepEqual([...new Set(calls.map((init) => init.headers['Idempotency-Key']))], [SESSION_PARAMS.idempotencyKey])
+})
+
+test('when the attempts run out, the last PAYMENT_PROCESSING_UNAVAILABLE refusal comes back as it arrived', async () => {
+  let attempts = 0
+  const fetchImpl = async () => {
+    attempts++
+    return jsonResponse(200, { success: false, errorCode: 'PAYMENT_PROCESSING_UNAVAILABLE' })
+  }
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, { attempts: 2, baseDelayMs: 1 }),
+    (error) => {
+      assert.ok(error instanceof CheckoutRefusedError)
+      assert.equal(error.errorCode, 'PAYMENT_PROCESSING_UNAVAILABLE')
+      return true
+    },
+  )
+  assert.equal(attempts, 2)
+})

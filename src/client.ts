@@ -170,11 +170,16 @@ export class DominaiteClient {
   }
 
   /**
-   * createCheckoutSession with retries on TransportError only, sending your
-   * idempotency key unchanged on every attempt - which is what makes the retry safe:
-   * the API never opens a second payment for a key it has already seen.
+   * createCheckoutSession with retries on TransportError and on PAYMENT_PROCESSING_UNAVAILABLE,
+   * sending your idempotency key unchanged on every attempt - which is what makes the retry
+   * safe: the API never opens a second payment for a key it has already seen.
    *
-   * Refusals and authentication failures are not retried; they will not change. Neither
+   * PAYMENT_PROCESSING_UNAVAILABLE is retried in both forms the gateway sends it: a 503,
+   * and an HTTP 200 refusal (CheckoutRefusedError). Either way card payments are briefly
+   * off and nothing was created. When the attempts run out the last error comes back as
+   * it arrived.
+   *
+   * Other refusals and authentication failures are not retried; they will not change. Neither
    * is a 429: retrying into a limiter that just said stop makes it worse, so the
    * RateLimitError comes straight back with retryAfterSeconds for you to honour.
    *
@@ -194,12 +199,15 @@ export class DominaiteClient {
       throw new TypeError('attempts must be a positive integer')
     }
 
-    let lastError: TransportError | undefined
+    let lastError: TransportError | CheckoutRefusedError | undefined
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         return await this.createCheckoutSession(params)
       } catch (error) {
-        if (!(error instanceof TransportError)) {
+        const retryable =
+          error instanceof TransportError ||
+          (error instanceof CheckoutRefusedError && error.errorCode === 'PAYMENT_PROCESSING_UNAVAILABLE')
+        if (!retryable) {
           throw error
         }
         lastError = error
@@ -209,7 +217,7 @@ export class DominaiteClient {
       }
     }
 
-    throw lastError as TransportError
+    throw lastError as TransportError | CheckoutRefusedError
   }
 
   /**

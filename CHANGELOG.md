@@ -25,3 +25,8 @@
   gateway's exponent (HUF is whole forints, unlike ISO 4217), no floating point. An unknown
   currency is an error, and ISK, KRW, OMR, JOD and TND are refused as not supported.
 - `isPaid()` and `isTerminal()` status helpers.
+
+### Changed
+
+- `createCheckoutSessionWithRetry` also retries `PAYMENT_PROCESSING_UNAVAILABLE` when it arrives
+  as an HTTP 200 refusal, under the same key, like the 503 form it already retried.
