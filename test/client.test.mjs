@@ -1086,3 +1086,27 @@ test('ErrorCodes names each code as itself and cannot be changed at runtime', ()
     assert.ok(SESSION_REFUSAL_ERROR_CODES.includes(ErrorCodes[code]))
   }
 })
+
+test('the retry helper retries a 503 carrying PAYMENT_PROCESSING_UNAVAILABLE with the SAME key', async () => {
+  // A 503 is the gateway being unavailable whatever code it carries; the code must not
+  // turn it into a refusal the helper gives up on.
+  for (const unavailable of [
+    { success: false, error: { code: 'PAYMENT_PROCESSING_UNAVAILABLE', message: 'Card payments are unavailable' } },
+    { success: false, errorCode: 'PAYMENT_PROCESSING_UNAVAILABLE', errorMessage: 'Card payments are unavailable' },
+  ]) {
+    const calls = []
+    const fetchImpl = async (url, init) => {
+      calls.push(init)
+      return calls.length < 3 ? jsonResponse(503, unavailable) : jsonResponse(200, { success: true, checkout: CHECKOUT })
+    }
+
+    const session = await makeClient(fetchImpl).createCheckoutSessionWithRetry(SESSION_PARAMS, {
+      attempts: 3,
+      baseDelayMs: 1,
+    })
+
+    assert.deepEqual(session, CHECKOUT)
+    assert.equal(calls.length, 3)
+    assert.deepEqual([...new Set(calls.map((init) => init.headers['Idempotency-Key']))], [SESSION_PARAMS.idempotencyKey])
+  }
+})
