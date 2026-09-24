@@ -555,22 +555,35 @@ test('a 100-character Cyrillic orderReference passes validation', async () => {
   assert.equal(calls.length, 1, 'a 100-code-point reference must reach the network')
 })
 
-test('a 100-code-point idempotency key passes, and 101 does not', async () => {
+test('an idempotency key is 1 to 100 visible ASCII characters', async () => {
   const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
   const client = makeClient(fetchImpl)
 
-  await client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey: 'ключ'.repeat(25) })
-  assert.equal(calls.length, 1)
+  await client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey: 'k'.repeat(100) })
+  // Every visible ASCII character, 0x21 to 0x7E, is allowed.
+  const visible = Array.from({ length: 0x7e - 0x21 + 1 }, (_, i) => String.fromCharCode(0x21 + i)).join('')
+  await client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey: visible })
+  assert.equal(calls.length, 2)
 
-  await assert.rejects(
-    () => client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey: `${'ключ'.repeat(25)}я` }),
-    TypeError,
-  )
+  for (const idempotencyKey of ['k'.repeat(101), 'ключ', 'order 1042', 'order\t1042', 'order-1042\n', 'caf\u00e9', '\u007f']) {
+    await assert.rejects(
+      () => client.createCheckoutSession({ ...SESSION_PARAMS, idempotencyKey }),
+      TypeError,
+      JSON.stringify(idempotencyKey),
+    )
+    await assert.rejects(
+      () => client.chargePaymentMethod(PAYMENT_METHOD_ID, { ...CHARGE_PARAMS, idempotencyKey }),
+      TypeError,
+      JSON.stringify(idempotencyKey),
+    )
+  }
+  assert.equal(calls.length, 2, 'a refused key must never reach the network')
+
   await assert.rejects(
     () => client.createCheckoutSession({ ...SESSION_PARAMS, orderReference: 'з'.repeat(101) }),
     TypeError,
   )
-  assert.equal(calls.length, 1, 'over-length fields must never reach the network')
+  assert.equal(calls.length, 2, 'over-length fields must never reach the network')
 })
 
 test('orderReference must be a non-empty string', async () => {

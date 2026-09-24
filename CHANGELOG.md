@@ -7,6 +7,9 @@
 - `idempotencyKey` is required on `createCheckoutSession`, `createCheckoutSessionWithRetry` and
   `chargePaymentMethod`. The SDK no longer makes up a random key; a missing or empty key throws
   `TypeError` before anything is sent.
+- An idempotency key must be 1 to 100 visible ASCII characters (0x21 to 0x7E). Keys with spaces,
+  control characters or non-ASCII letters, previously accepted up to 100 code points, now throw
+  `TypeError`.
 
   **Migration:** pass a key derived from the order, e.g.
   `idempotencyKey: orderIdempotencyKey({ scope: 'checkout', orderId, amountMinor, currency })`.

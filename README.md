@@ -263,8 +263,9 @@ orderIdempotencyKey({ scope: 'checkout', orderId: 'order-1042', amountMinor: 250
   with it and you get a fresh session. Reusing the old key with a new amount would be refused
   with `IDEMPOTENCY_KEY_REUSED`.
 - `scope` keeps different kinds of request for one order apart (`checkout`, `charge`, ...).
-- The key is at most 100 characters; the helper throws `TypeError` if `scope` and `orderId` make it
-  longer, or if an input is malformed. `amountMinor` is the integer you send as `amount`.
+- A key is 1 to 100 visible ASCII characters (`0x21` to `0x7E`): no spaces, no accented or
+  Cyrillic letters. The helper throws `TypeError` if `scope` and `orderId` break that (slug the
+  order id first), or if an input is malformed. `amountMinor` is the integer you send as `amount`.
 
 ## Retries and double-charges
 

@@ -1,6 +1,13 @@
 /** Maximum length of the fields the API caps at 100, counted in Unicode code points. */
 export const MAX_FIELD_CODE_POINTS = 100
 
+/**
+ * An idempotency key is 1 to 100 VISIBLE ASCII characters (0x21 to 0x7E): no spaces, no
+ * control characters, nothing outside ASCII. The key travels in an HTTP header and in the
+ * signed payload, so anything else either cannot be sent or signs differently than it arrives.
+ */
+const IDEMPOTENCY_KEY_PATTERN = /^[\x21-\x7E]{1,100}$/
+
 /** ISO 4217 alphabetic code, before uppercasing. */
 const CURRENCY_PATTERN = /^[A-Za-z]{3}$/
 
@@ -25,8 +32,9 @@ export interface OrderIdempotencyKeyInput {
  * produces a new key, so an edited basket gets a new session instead of an
  * IDEMPOTENCY_KEY_REUSED refusal.
  *
- * Throws TypeError when an input is missing or malformed, or when the key would pass the
- * API's 100 character limit (shorten scope or orderId).
+ * Throws TypeError when an input is missing or malformed, or when the key would break the
+ * key rules: over 100 characters, or anything but visible ASCII (a space or an accented
+ * letter in scope or orderId). Shorten or slug the order id in that case.
  */
 export function orderIdempotencyKey(input: OrderIdempotencyKeyInput): string {
   const { scope, orderId, amountMinor, currency } = input ?? ({} as OrderIdempotencyKeyInput)
@@ -47,8 +55,8 @@ export function orderIdempotencyKey(input: OrderIdempotencyKeyInput): string {
 }
 
 /**
- * The key rules every idempotent request shares: required, a non-empty string, at most
- * 100 code points. There is no fallback: a key made up here would differ on every attempt,
+ * The key rules every idempotent request shares: required, 1 to 100 visible ASCII
+ * characters. There is no fallback: a key made up here would differ on every attempt,
  * which is exactly the double payment the key exists to prevent.
  */
 export function normalizeIdempotencyKey(providedKey: unknown): string {
@@ -57,13 +65,9 @@ export function normalizeIdempotencyKey(providedKey: unknown): string {
       'idempotencyKey is required. Derive it from your order with orderIdempotencyKey(), never per attempt',
     )
   }
-  if (
-    typeof providedKey !== 'string' ||
-    providedKey === '' ||
-    countCodePoints(providedKey) > MAX_FIELD_CODE_POINTS
-  ) {
+  if (typeof providedKey !== 'string' || !IDEMPOTENCY_KEY_PATTERN.test(providedKey)) {
     throw new TypeError(
-      `idempotencyKey must be a non-empty string of at most ${MAX_FIELD_CODE_POINTS} characters`,
+      'idempotencyKey must be 1 to 100 visible ASCII characters (0x21-0x7E): no spaces, no accents',
     )
   }
   return providedKey

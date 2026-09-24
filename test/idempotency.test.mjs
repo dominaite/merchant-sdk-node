@@ -44,6 +44,13 @@ test('a key past the 100 character limit is refused here, not by the gateway', (
   assert.throws(() => orderIdempotencyKey({ ...ORDER, orderId: 'x'.repeat(83) }), TypeError)
 })
 
+test('orderIdempotencyKey refuses an order id that would put a space or non-ASCII in the key', () => {
+  assert.throws(() => orderIdempotencyKey({ ...ORDER, orderId: 'order 1042' }), TypeError)
+  assert.throws(() => orderIdempotencyKey({ ...ORDER, orderId: 'поръчка-1042' }), TypeError)
+  assert.throws(() => orderIdempotencyKey({ ...ORDER, scope: 'check out' }), TypeError)
+  assert.match(orderIdempotencyKey({ ...ORDER, orderId: 'ORD_1042/b' }), /^[\x21-\x7E]+$/)
+})
+
 test('the derived key is what goes on the wire as Idempotency-Key', async () => {
   const calls = []
   const fetchImpl = async (url, init) => {
