@@ -29,7 +29,7 @@ export type { OrderIdempotencyKeyInput } from './idempotency.js'
 export { signRequest } from './signing.js'
 export type { SignRequestInput } from './signing.js'
 export { isPaid, isTerminal } from './status.js'
-export { verifyWebhook } from './webhooks.js'
+export { parseWebhookEvent, verifyWebhook } from './webhooks.js'
 export {
   CHARGE_STATUSES,
   DECLINE_CLASSES,
@@ -38,19 +38,27 @@ export {
   TRANSACTION_STATUSES,
 } from './types.js'
 export type {
+  AgreementWebhookData,
+  AgreementWebhookEvent,
   ChargePaymentMethodParams,
   ChargeStatus,
+  ChargeWebhookData,
+  ChargeWebhookEvent,
   CheckoutCustomer,
   CheckoutSession,
   CheckoutStatus,
   CreateCheckoutSessionParams,
   DeclineClass,
   DominaiteClientOptions,
+  DominaiteWebhookEvent,
   PaymentMethodCharge,
+  PaymentWebhookData,
+  PaymentWebhookEvent,
   Ping,
   RetryOptions,
   StoredPaymentMethod,
   StoredPaymentMethodRetiredReason,
   StoredPaymentMethodStatus,
   TransactionStatus,
+  WebhookEvent,
 } from './types.js'
