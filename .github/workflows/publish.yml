@@ -12,12 +12,21 @@ name: Publish to npm
 #   Workflow filename:    publish.yml
 #   Environment name:     npm
 #
-# npm also checks that package.json's repository.url points at this repo.
-# Trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0, hence Node 24 and the
-# npm upgrade below.
+#   Allowed actions:      untick `npm publish` (stage-only), so this workflow can only stage
 #
-# Tag push = release. The tag (minus the v) must equal package.json's version.
-# workflow_dispatch republishes the current package.json version from the chosen ref,
+# npm also checks that package.json's repository.url points at this repo.
+# Trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0; `npm stage` needs npm >= 11.15.0,
+# hence Node 24 and the npm upgrade below.
+#
+# Staged publishing: this workflow uploads the release to npm's stage queue. It is NOT
+# installable until a maintainer approves it with a 2FA / passkey check, which a CI token
+# cannot do:
+#   npm stage list @dominaite/merchant-sdk
+#   npm stage approve <stage-id>        (or approve it on npmjs.com)
+# A stolen CI token or a compromised workflow can stage a version but never release one.
+#
+# Tag push = staged release. The tag (minus the v) must equal package.json's version.
+# workflow_dispatch stages the current package.json version from the chosen ref,
 # for a tag whose publish run failed (v0.3.0 hit a Node 24 test-runner change).
 
 on:
@@ -40,9 +49,9 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Upgrade npm to a trusted-publishing capable version
+      - name: Upgrade npm to a version with trusted publishing and npm stage
         run: |
-          npm install -g npm@^11.5.1
+          npm install -g npm@^11.15.0
           npm --version
 
       - name: Refuse a tag that disagrees with the package version
@@ -61,5 +70,19 @@ jobs:
         run: npm test
 
       # prepare rebuilds dist before the tarball is packed.
-      - name: Publish (trusted publishing, no tokens)
-        run: npm publish --access public
+      - name: Stage the release (trusted publishing, no tokens)
+        run: npm stage publish --access public --provenance
+
+      - name: Tell the maintainer what to approve
+        run: |
+          version=$(node -p "require('./package.json').version")
+          {
+            echo "### @dominaite/merchant-sdk $version is staged, not live"
+            echo
+            echo "Approve it with your passkey / 2FA:"
+            echo
+            echo '```'
+            echo "npm stage list @dominaite/merchant-sdk"
+            echo "npm stage approve <stage-id>"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
