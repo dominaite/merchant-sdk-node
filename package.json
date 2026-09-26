@@ -3,6 +3,10 @@
   "version": "0.3.0",
   "description": "Server-side Node.js client for the Dominaite merchant API: create hosted checkout sessions from your own backend.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dominaite/merchant-sdk-node.git"
+  },
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
