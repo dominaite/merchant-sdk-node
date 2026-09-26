@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1 (unreleased)
+
+### Added
+
+- `parseWebhookEvent()`: parses a verified webhook body and checks the envelope. Types for the
+  envelope (`WebhookEvent`, `DominaiteWebhookEvent`) and for `payment.*`, `agreement.*` and
+  `charge.*` data.
+- Webhook envelopes carry `apiVersion` (a date, currently `2026-09-25`), and `agreement.*` and
+  `charge.*` data carry an integer `sequence` for ordering out-of-order deliveries. Both are
+  optional in the types so payloads from a gateway that does not send them yet still parse. The
+  README documents the ordering rule.
+
 ## 0.3.0
 
 ### Breaking

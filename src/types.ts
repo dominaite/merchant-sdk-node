@@ -262,3 +262,136 @@ export interface RetryOptions {
   /** Delay before the first retry; doubles each attempt. Defaults to 500. */
   baseDelayMs?: number
 }
+
+/**
+ * The signed body of every webhook delivery, whatever its type. Parse it with
+ * {@link parseWebhookEvent} after {@link verifyWebhook} has accepted the raw bytes.
+ */
+export interface WebhookEvent<TType extends string = string, TData = Record<string, unknown>> {
+  /** Delivery id, stable across retries of the same delivery. Dedupe on it. */
+  id: string
+  type: TType
+  /**
+   * Dated version of the payload shapes, e.g. '2026-09-25'. A new date means a breaking
+   * change to the envelope or a data shape; added fields keep the current one. Absent on
+   * deliveries from a gateway that predates it.
+   */
+  apiVersion?: string
+  /**
+   * ISO 8601, when the change happened. Several events can share the same value, so it
+   * is not an ordering key: order agreement and charge events by data.sequence instead.
+   */
+  createdAt: string
+  data: TData
+  [key: string]: unknown
+}
+
+/** The data of a payment.* event. Amounts are minor units. */
+export interface PaymentWebhookData {
+  transactionId: string
+  status: TransactionStatus | string
+  previousStatus?: TransactionStatus | string | null
+  kind?: string
+  /** What you are paid; on payment.refunded, what went back to the customer. */
+  amount: number
+  /** The card movement, surcharge included. */
+  grossAmount?: number
+  surchargeAmount?: number
+  currency: string
+  originalTransactionId?: string | null
+  idempotencyKey?: string | null
+  [key: string]: unknown
+}
+
+/**
+ * The data of an agreement.* event: the agreement as the agreement routes return it,
+ * plus previousStatus.
+ */
+export interface AgreementWebhookData {
+  /** The agreement id. It is the object data.sequence counts for. */
+  id: string
+  planId: string
+  customerReference: string
+  storedPaymentMethodId: string | null
+  status: string
+  previousStatus: string | null
+  /** Minor units. */
+  amount: number
+  currency: string
+  intervalUnit: string
+  intervalCount: number
+  periodCount: number | null
+  trialDays: number
+  nextChargeAt: string | null
+  activatedAt: string | null
+  cancelledAt: string | null
+  version: number
+  /**
+   * Per-agreement counter; process an event only when it is higher than the highest one
+   * you have handled for this agreement. 0 means the event was recorded before the counter
+   * existed and is older than any positive value. Absent on deliveries from a gateway that
+   * predates it.
+   */
+  sequence?: number
+  [key: string]: unknown
+}
+
+/** The data of a charge.* event: the charge as the stored-card routes return it, plus the outcome detail. */
+export interface ChargeWebhookData {
+  chargeId: string
+  transactionId: string
+  storedPaymentMethodId: string
+  /** Set for a platform (agreement) charge, null for a one-off charge. */
+  agreementId: string | null
+  customerReference: string | null
+  outcome: 'succeeded' | 'failed' | 'retrying' | string
+  /** Set with agreementId: the billing period this charge is for. */
+  periodNumber: number | null
+  attemptNumber: number
+  /** Minor units. */
+  amount: number
+  currency: string
+  paymentMethod: { brand: string | null; last4: string | null; [key: string]: unknown }
+  orderReference: string | null
+  description: string | null
+  declineClass: DeclineClass | string | null
+  declineCode: string | null
+  nextAttemptAt: string | null
+  nextChargeAt: string | null
+  /**
+   * Per-object counter, where the object is the agreement period (agreementId +
+   * periodNumber) for a platform charge and chargeId for a one-off charge. Process an event
+   * only when it is higher than the highest one you have handled for that object. 0 means
+   * the event was recorded before the counter existed and is older than any positive value.
+   * Absent on deliveries from a gateway that predates it.
+   */
+  sequence?: number
+  [key: string]: unknown
+}
+
+export type PaymentWebhookEvent = WebhookEvent<
+  | 'payment.succeeded'
+  | 'payment.failed'
+  | 'payment.requires_capture'
+  | 'payment.cancelled'
+  | 'payment.abandoned'
+  | 'payment.refunded'
+  | 'payment.disputed',
+  PaymentWebhookData
+>
+
+export type AgreementWebhookEvent = WebhookEvent<
+  'agreement.activated' | 'agreement.past_due' | 'agreement.cancelled',
+  AgreementWebhookData
+>
+
+export type ChargeWebhookEvent = WebhookEvent<
+  'charge.succeeded' | 'charge.failed' | 'charge.retrying',
+  ChargeWebhookData
+>
+
+/**
+ * Every event type this SDK version models; narrow on `type`. A type added to the gateway
+ * later still parses, with the same envelope, so check `type` before trusting `data`.
+ */
+export type DominaiteWebhookEvent = PaymentWebhookEvent | AgreementWebhookEvent | ChargeWebhookEvent

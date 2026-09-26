@@ -1,5 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 
+import type { DominaiteWebhookEvent } from './types.js'
+
 /** Default clock tolerance, matching the gateway's own 300 seconds. */
 const DEFAULT_TOLERANCE_SECONDS = 300
 
@@ -85,6 +87,46 @@ export function verifyWebhook(
 
   const now = nowSeconds ?? Math.floor(Date.now() / 1000)
   return Math.abs(now - Number(parsed.timestamp)) <= toleranceSeconds
+}
+
+/**
+ * Parses a verified webhook body into a typed event. Call it only after
+ * {@link verifyWebhook} returned true for the same raw string.
+ *
+ * Checks the envelope (`id`, `type` and `createdAt` strings, `apiVersion` a string when
+ * present, `data` an object) and returns the parsed JSON as it is: nothing is renamed,
+ * defaulted or dropped, so fields a newer gateway adds come through. A delivery from a
+ * gateway that does not send `apiVersion` or `data.sequence` yet parses the same way, with
+ * those fields absent. Narrow on `type` before reading `data`.
+ *
+ * Throws SyntaxError when the body is not JSON and TypeError when it is not an envelope.
+ *
+ * @param payload The raw request body as a string, the same one you verified.
+ */
+export function parseWebhookEvent(payload: string): DominaiteWebhookEvent {
+  if (typeof payload !== 'string') {
+    throw new TypeError('payload must be the raw request body as a string')
+  }
+  const event: unknown = JSON.parse(payload)
+  if (!isPlainObject(event)) {
+    throw new TypeError('webhook body is not a JSON object')
+  }
+  for (const field of ['id', 'type', 'createdAt'] as const) {
+    if (typeof event[field] !== 'string') {
+      throw new TypeError(`webhook envelope field ${field} must be a string`)
+    }
+  }
+  if (event['apiVersion'] !== undefined && typeof event['apiVersion'] !== 'string') {
+    throw new TypeError('webhook envelope field apiVersion must be a string when present')
+  }
+  if (!isPlainObject(event['data'])) {
+    throw new TypeError('webhook envelope field data must be an object')
+  }
+  return event as unknown as DominaiteWebhookEvent
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 interface ParsedSignatureHeader {

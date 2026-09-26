@@ -441,12 +441,17 @@ Events you can subscribe to: `payment.succeeded`, `payment.failed`, `payment.req
 the only one that means money in hand. In-flight states (`pending`, `processing`) are never
 webhooked - see the polling subsection below for those.
 
+Recurring billing adds `agreement.activated`, `agreement.past_due`, `agreement.cancelled`,
+`charge.succeeded`, `charge.failed` and `charge.retrying`, on the same envelope and the same retry
+ladder. See [Ordering agreement and charge events](#ordering-agreement-and-charge-events).
+
 The body is flat JSON, with no `success` wrapper to branch on:
 
 ```json
 {
   "id": "7f9c24e5-1d1f-4c0a-9b6c-2f3a4d5e6f70",
   "type": "payment.succeeded",
+  "apiVersion": "2026-09-25",
   "createdAt": "2026-08-20T14:00:00Z",
   "data": {
     "transactionId": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
@@ -466,6 +471,10 @@ The body is flat JSON, with no `success` wrapper to branch on:
 Amounts are minor units. On `payment.*` the `amount` is what you are paid and `grossAmount` is the
 card movement; on `payment.refunded` the `amount` is what went back to the customer.
 
+`apiVersion` is the dated version of the payload shapes. A new date means a breaking change to the
+envelope or a `data` shape; added fields keep the current date. A gateway that predates it does not
+send it, so the SDK types it as optional.
+
 ### Verify first, parse second
 
 Every delivery carries `X-Webhook-Signature: t={unix_seconds},v1={hex}` - HMAC-SHA256 over
@@ -475,7 +484,7 @@ captured earlier.
 
 ```js
 import express from 'express'
-import { verifyWebhook } from '@dominaite/merchant-sdk'
+import { parseWebhookEvent, verifyWebhook } from '@dominaite/merchant-sdk'
 
 const app = express()
 
@@ -488,7 +497,7 @@ app.post('/webhooks/dominaite', express.raw({ type: 'application/json' }), (req,
     return res.sendStatus(400)
   }
 
-  const event = JSON.parse(raw)
+  const event = parseWebhookEvent(raw)
   if (alreadyHandled(event.id)) {
     return res.sendStatus(200)     // duplicate delivery, nothing to do
   }
@@ -504,6 +513,13 @@ timestamp, a malformed or missing header - comes back `false` rather than throwi
 `TypeError` only when your own call is wrong (a Buffer instead of a string, an empty secret). The
 `nowSeconds` argument exists so tests can pin a fixed clock; leave it unset in production.
 
+`parseWebhookEvent(raw)` parses the verified body and checks the envelope (`id`, `type`,
+`createdAt`, `data`). It returns the JSON as it arrived, typed as `DominaiteWebhookEvent`, so
+narrowing on `event.type` gives you `PaymentWebhookData`, `AgreementWebhookData` or
+`ChargeWebhookData`. Nothing is renamed or defaulted: a field the gateway adds later comes through,
+and one an older gateway does not send yet (`apiVersion`, `sequence`) is simply absent. It throws
+`SyntaxError` for a body that is not JSON and `TypeError` for one that is not an envelope.
+
 The recipe is pinned by the same offline vector every Dominaite SDK ships, so a Node verifier and a
 Python one agree byte-for-byte. `npm test` reproduces it.
 
@@ -518,7 +534,44 @@ Python one agree byte-for-byte. `npm test` reproduces it.
 - **Circuit breaker**: an endpoint that fails its initial attempt and every configured retry, over
   and over, is auto-disabled. Any later successful delivery re-enables it. An endpoint you disable
   by hand in the dashboard stays disabled.
-- Order is not guaranteed. Use `createdAt` and `previousStatus` rather than assuming arrival order.
+- Order is not guaranteed. For `payment.*`, use `createdAt` and `previousStatus` rather than
+  assuming arrival order. For `agreement.*` and `charge.*`, use `data.sequence` (next section).
+
+### Ordering agreement and charge events
+
+Every `agreement.*` and `charge.*` event carries an integer `data.sequence`, counted per object:
+
+> Deliveries can arrive out of order. Keep the highest sequence you have processed per object and
+> discard any event whose sequence is not higher; when you need current state, read the object by
+> id. createdAt can repeat across events, so order by sequence, not createdAt. A sequence of 0 only
+> comes from events recorded before the counter existed; treat it as older than any positive number.
+
+The object is:
+
+- `agreement.*`: the agreement, `data.id`.
+- `charge.*` for a platform charge (one with an `agreementId`): the agreement period,
+  `data.agreementId` plus `data.periodNumber`.
+- `charge.*` for a one-off charge: `data.chargeId`.
+
+```js
+function orderingKey(event) {
+  if (event.type.startsWith('agreement.')) return `agreement:${event.data.id}`
+  if (event.data.agreementId) return `period:${event.data.agreementId}:${event.data.periodNumber}`
+  return `charge:${event.data.chargeId}`
+}
+
+// Inside your worker, in the same database transaction as the work itself.
+const key = orderingKey(event)
+const seen = await highestSequence(key)          // undefined when you have none yet
+if (seen !== undefined && event.data.sequence <= seen) {
+  return                                          // stale or duplicate, drop it
+}
+await applyEvent(event)
+await saveHighestSequence(key, event.data.sequence)
+```
+
+`sequence` is typed optional because a gateway older than this contract does not send it. If you
+receive events without it, you cannot order them by sequence; read the object by id instead.
 
 ### Webhooks do not replace your reconciliation sweep
 
