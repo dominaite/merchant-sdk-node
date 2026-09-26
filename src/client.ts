@@ -5,6 +5,9 @@ import {
   CheckoutRefusedError,
   DominaiteError,
   RateLimitError,
+  REFUND_ERROR_CODES,
+  RefundError,
+  type RefundErrorCode,
   RevokeError,
   STOREFRONT_ERROR_CODES,
   StorefrontError,
@@ -18,9 +21,11 @@ import type {
   CheckoutSession,
   CheckoutStatus,
   CreateCheckoutSessionParams,
+  CreateRefundParams,
   DominaiteClientOptions,
   PaymentMethodCharge,
   Ping,
+  Refund,
   RetryOptions,
   StoredPaymentMethod,
 } from './types.js'
@@ -28,6 +33,7 @@ import type {
 const DEFAULT_BASE_URL = 'https://api.dominaite.com/payments'
 const SESSIONS_PATH = '/merchant-api/checkout/sessions'
 const PAYMENT_METHODS_PATH = '/merchant-api/payment-methods'
+const PAYMENTS_PATH = '/merchant-api/payments'
 const PING_PATH = '/merchant-api/ping'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
 const SDK_VERSION = '0.3.0'
@@ -39,6 +45,8 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  * path and request another.
  */
 const PAYMENT_METHOD_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/
+/** A refund id (re_...) is opaque too, and goes into the signed path the same way. */
+const REFUND_ID_PATTERN = PAYMENT_METHOD_ID_PATTERN
 /** Hard ceiling on a response body. Past this the read is abandoned, not buffered. */
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 /** Hosts allowed to be reached over plain http, for local development only. */
@@ -90,6 +98,7 @@ interface Reply {
 export class DominaiteClient {
   static readonly SESSIONS_PATH = SESSIONS_PATH
   static readonly PAYMENT_METHODS_PATH = PAYMENT_METHODS_PATH
+  static readonly PAYMENTS_PATH = PAYMENTS_PATH
   static readonly PING_PATH = PING_PATH
 
   readonly #keyId: string
@@ -356,6 +365,51 @@ export class DominaiteClient {
     throw rejection(reply)
   }
 
+  /**
+   * Refunds a payment, in full or in part. Answers once the refund is queued (HTTP 202),
+   * not once the money has moved: read the outcome with getRefund(), or wait for the
+   * payment.refunded webhook. A refund that fails sends no webhook, so poll getRefund() if
+   * you need to know about failures.
+   *
+   * transactionId is the id the checkout session or the charge returned. Omit
+   * params.amount to refund everything still refundable; otherwise it is MINOR units of
+   * the payment's currency (use toMinorUnits()). The refund is signed and carries the
+   * Idempotency-Key you pass (required; derive it from your return or credit note), so
+   * retrying WITH THE SAME KEY never refunds twice: the gateway answers with the same
+   * refund as it stands now.
+   *
+   * Throws RefundError when the gateway answered with a code: PAYMENT_NOT_FOUND (404),
+   * PAYMENT_NOT_REFUNDABLE or REFUND_AMOUNT_EXCEEDED (422, nothing queued, the key is not
+   * burnt), IDEMPOTENCY_KEY_REUSED (422), DUPLICATE_REQUEST (409, retryable with the same
+   * key), IDEMPOTENCY_KEY_REQUIRED (400). Otherwise AuthenticationError, RateLimitError,
+   * ApiError, or TransportError (network or 5xx, nothing queued on a 500 - retry with the
+   * same key).
+   */
+  async createRefund(transactionId: string, params: CreateRefundParams): Promise<Refund> {
+    const id = normalizeTransactionId(transactionId)
+    const { idempotencyKey, body } = this.#prepareRefundRequest(params)
+    const reply = await this.#send('POST', `${PAYMENTS_PATH}/${id}/refunds`, body, idempotencyKey)
+    return readRefund(reply)
+  }
+
+  /**
+   * Reads one refund of one of your payments: pending, processing, succeeded or failed.
+   * A failed refund resolves too, with failureCode saying why and amount null; it is not
+   * an exception.
+   *
+   * Throws RefundError: REFUND_NOT_FOUND (404, retryable) right after createRefund() means
+   * the refund is not picked up yet, so poll again for up to 60 seconds; PAYMENT_NOT_FOUND
+   * (404) for a payment that is not yours. Otherwise AuthenticationError, RateLimitError,
+   * ApiError or TransportError.
+   */
+  async getRefund(transactionId: string, refundId: string): Promise<Refund> {
+    const id = normalizeTransactionId(transactionId)
+    const refund = normalizeRefundId(refundId)
+    // GET signs an EMPTY idempotency key and an EMPTY body.
+    const reply = await this.#send('GET', `${PAYMENTS_PATH}/${id}/refunds/${refund}`, null, '')
+    return readRefund(reply)
+  }
+
   #prepareSessionRequest(params: CreateCheckoutSessionParams): { idempotencyKey: string; body: string } {
     validateMoneyParams(params)
     const { idempotencyKey: providedKey, ...bodyParams } = params
@@ -377,6 +431,33 @@ export class DominaiteClient {
     }
     if (params.description !== undefined) {
       bodyParams['description'] = params.description
+    }
+
+    return { idempotencyKey: normalizeIdempotencyKey(params.idempotencyKey), body: encodeBody(bodyParams) }
+  }
+
+  #prepareRefundRequest(params: CreateRefundParams): { idempotencyKey: string; body: string } {
+    if (typeof params !== 'object' || params === null) {
+      throw new TypeError('params must be an object carrying idempotencyKey')
+    }
+
+    // Built field by field, not spread: the body is what gets signed, and a full refund
+    // is an absent amount, never a null one.
+    const bodyParams: Record<string, unknown> = {}
+    if (params.amount !== undefined) {
+      if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
+        throw new TypeError(
+          'amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR); ' +
+            'omit it to refund everything still refundable',
+        )
+      }
+      bodyParams['amount'] = params.amount
+    }
+    if (params.reason !== undefined) {
+      if (typeof params.reason !== 'string') {
+        throw new TypeError('reason must be a string')
+      }
+      bodyParams['reason'] = params.reason
     }
 
     return { idempotencyKey: normalizeIdempotencyKey(params.idempotencyKey), body: encodeBody(bodyParams) }
@@ -532,6 +613,53 @@ function rejection(reply: Reply): DominaiteError {
   return new ApiError(reply.status, message, errorCode === '' ? undefined : errorCode)
 }
 
+/**
+ * A refund reply: the refund on a 2xx, a RefundError for the refund codes on a 4xx, and the
+ * generic reading otherwise (5xx is transport, so a 500 is retried with the same key).
+ */
+function readRefund(reply: Reply): Refund {
+  const data = reply.envelope['data']
+  if (reply.status < 300 && isPlainObject(data) && typeof data['refundId'] === 'string') {
+    return toRefund(data)
+  }
+
+  const errorCode = stringOr(reply.error['code'], '')
+  if (reply.status >= 400 && reply.status < 500 && isRefundErrorCode(errorCode)) {
+    throw new RefundError(
+      reply.status,
+      errorCode,
+      stringOr(reply.error['message'], 'The refund was refused.'),
+      reply.envelope,
+    )
+  }
+  if (reply.status >= 400) {
+    throw rejection(reply)
+  }
+  throw new ApiError(reply.status, 'The API answered the refund without a refund body')
+}
+
+function isRefundErrorCode(code: string): code is RefundErrorCode {
+  return (REFUND_ERROR_CODES as readonly string[]).includes(code)
+}
+
+/**
+ * The refund as one shape: the gateway omits amount, failureCode, failureMessage and
+ * completedAt when they are null, so read absent as null.
+ */
+function toRefund(data: Record<string, unknown>): Refund {
+  return {
+    ...data,
+    refundId: String(data['refundId']),
+    transactionId: stringOr(data['transactionId'], ''),
+    status: stringOr(data['status'], ''),
+    amount: typeof data['amount'] === 'number' ? data['amount'] : null,
+    currency: stringOr(data['currency'], ''),
+    failureCode: typeof data['failureCode'] === 'string' ? data['failureCode'] : null,
+    failureMessage: typeof data['failureMessage'] === 'string' ? data['failureMessage'] : null,
+    completedAt: typeof data['completedAt'] === 'string' ? data['completedAt'] : null,
+  }
+}
+
 /** Storefront refusals keep their own error on sessions and charges alike. */
 function isStorefrontErrorCode(code: string): code is StorefrontErrorCode {
   return (STOREFRONT_ERROR_CODES as readonly string[]).includes(code)
@@ -597,6 +725,23 @@ function normalizePaymentMethodId(paymentMethodId: unknown): string {
   const normalized = String(paymentMethodId ?? '').trim()
   if (!PAYMENT_METHOD_ID_PATTERN.test(normalized)) {
     throw new TypeError('paymentMethodId must be the id from getStatus().storedPaymentMethod')
+  }
+  return normalized
+}
+
+/** The payment id goes into the signed path in the lowercase hyphenated form the gateway signs. */
+function normalizeTransactionId(transactionId: unknown): string {
+  const normalized = String(transactionId ?? '').trim().toLowerCase()
+  if (!UUID_PATTERN.test(normalized)) {
+    throw new TypeError('transactionId must be the payment UUID returned by createCheckoutSession() or a charge')
+  }
+  return normalized
+}
+
+function normalizeRefundId(refundId: unknown): string {
+  const normalized = String(refundId ?? '').trim()
+  if (!REFUND_ID_PATTERN.test(normalized)) {
+    throw new TypeError('refundId must be the refundId returned by createRefund()')
   }
   return normalized
 }

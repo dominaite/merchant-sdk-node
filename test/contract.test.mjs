@@ -11,6 +11,10 @@ import {
   CheckoutRefusedError,
   DECLINE_CLASSES,
   DominaiteClient,
+  REFUND_ERROR_CODES,
+  REFUND_FAILURE_CODES,
+  REFUND_STATUSES,
+  RefundError,
   REVOKE_ERROR_CODES,
   RevokeError,
   SESSION_REFUSAL_ERROR_CODES,
@@ -498,6 +502,97 @@ test('a revoke of an unknown id is the generic ApiError 404', async () => {
   assert.equal(error.errorCode, example.code)
 })
 
+const TRANSACTION_ID = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+const REFUND_KEY = 'refund-credit-note-77'
+/** The refund fields the gateway leaves off the wire when null. */
+const REFUND_NULLS = { amount: null, failureCode: null, failureMessage: null, completedAt: null }
+
+test('the refund exposes exactly the contract fields and vocabularies', () => {
+  assert.deepEqual(declaredFields('Refund'), CONTRACT.endpoints.createRefund.fields)
+  assert.deepEqual(declaredFields('Refund'), CONTRACT.endpoints.getRefund.fields)
+  assert.deepEqual([...REFUND_STATUSES], CONTRACT.refundStatusVocabulary)
+  assert.deepEqual([...REFUND_ERROR_CODES], CONTRACT.refundErrorCodes)
+  assert.deepEqual([...REFUND_FAILURE_CODES], CONTRACT.refundFailureCodes)
+})
+
+test('createRefund() returns the partial and full contract examples, absent fields as null', async () => {
+  const { createRefund } = CONTRACT.endpoints
+  const cases = [
+    { example: createRefund.partialExample, params: { amount: 2500, idempotencyKey: REFUND_KEY } },
+    { example: createRefund.fullExample, params: { idempotencyKey: REFUND_KEY } },
+  ]
+
+  for (const { example, params } of cases) {
+    const { fetchImpl, calls } = recordingFetch(example, createRefund.httpStatus)
+
+    const refund = await makeClient(fetchImpl).createRefund(example.data.transactionId, params)
+
+    assert.deepEqual(refund, { ...REFUND_NULLS, ...example.data })
+    assert.deepEqual(Object.keys(refund).sort(), [...createRefund.fields].sort())
+    assert.ok(REFUND_STATUSES.includes(refund.status))
+    assert.equal(
+      calls[0].url,
+      BASE_URL + createRefund.path.replace('{transactionId}', example.data.transactionId),
+    )
+    assert.equal(calls[0].init.method, createRefund.method)
+    assert.equal(calls[0].init.headers['Idempotency-Key'], REFUND_KEY)
+  }
+  // The full example is a full refund: no amount until it succeeds.
+  assert.equal('amount' in createRefund.fullExample.data, false)
+})
+
+test('getRefund() returns the succeeded and failed contract examples, a failed refund as a result', async () => {
+  const { getRefund } = CONTRACT.endpoints
+
+  for (const example of [getRefund.succeededExample, getRefund.failedExample]) {
+    const { fetchImpl, calls } = recordingFetch(example, getRefund.httpStatus)
+    const { transactionId, refundId } = example.data
+
+    const refund = await makeClient(fetchImpl).getRefund(transactionId, refundId)
+
+    assert.deepEqual(refund, { ...REFUND_NULLS, ...example.data })
+    assert.deepEqual(Object.keys(refund).sort(), [...getRefund.fields].sort())
+    assert.equal(
+      calls[0].url,
+      BASE_URL + getRefund.path.replace('{transactionId}', transactionId).replace('{refundId}', refundId),
+    )
+    assert.equal(calls[0].init.method, getRefund.method)
+    assert.equal('Idempotency-Key' in calls[0].init.headers, false)
+  }
+
+  const failed = getRefund.failedExample.data
+  assert.equal(failed.status, 'failed')
+  assert.equal('amount' in failed, false)
+  assert.ok(REFUND_FAILURE_CODES.includes(failed.failureCode))
+})
+
+test('every refund error example in the contract is a RefundError with code, status and envelope intact', async () => {
+  const { createRefund, getRefund } = CONTRACT.endpoints
+  const seen = new Set()
+  const routes = [
+    { examples: createRefund.errorExamples, call: (client) => client.createRefund(TRANSACTION_ID, { idempotencyKey: REFUND_KEY }) },
+    { examples: getRefund.errorExamples, call: (client) => client.getRefund(TRANSACTION_ID, 're_7c1e9a2b4d6f48a0b3c5d7e9f1a2b3c4') },
+  ]
+
+  for (const { examples, call } of routes) {
+    for (const example of examples) {
+      const { fetchImpl } = recordingFetch(example.body, example.httpStatus)
+      const error = await rejects(() => call(makeClient(fetchImpl)))
+
+      assert.ok(error instanceof RefundError, `${example.code} must be a RefundError, got ${error?.constructor?.name}`)
+      assert.ok(error instanceof ApiError)
+      assert.equal(error.httpStatus, example.httpStatus)
+      assert.equal(error.errorCode, example.code)
+      assert.equal(error.message, example.body.error.message)
+      assert.ok(REFUND_ERROR_CODES.includes(error.errorCode))
+      assert.deepEqual(error.result, example.body)
+      seen.add(example.code)
+    }
+  }
+
+  assert.ok(seen.has('REFUND_NOT_FOUND'))
+})
+
 test('the contract examples themselves carry exactly their declared fields', () => {
   const { ping, createCheckoutSession, getStatus, chargePaymentMethod } = CONTRACT.endpoints
 
@@ -520,6 +615,23 @@ test('the contract examples themselves carry exactly their declared fields', () 
     Object.keys(getStatus.savedCardExample.storedPaymentMethod).sort(),
     [...getStatus.storedPaymentMethodFields].sort(),
   )
+  // Refund examples are in wire form: every field they carry is declared, nulls are absent.
+  const { createRefund, getRefund } = CONTRACT.endpoints
+  for (const example of [
+    createRefund.partialExample,
+    createRefund.fullExample,
+    getRefund.succeededExample,
+    getRefund.failedExample,
+  ]) {
+    for (const field of Object.keys(example.data)) {
+      assert.ok(createRefund.fields.includes(field), field)
+    }
+  }
+  for (const example of [...createRefund.errorExamples, ...getRefund.errorExamples]) {
+    assert.equal(example.body.success, false)
+    assert.equal(example.body.error.code, example.code)
+    assert.equal(example.body.error.statusCode, example.httpStatus)
+  }
   const chargeFields = [...chargePaymentMethod.fields].sort()
   assert.deepEqual(Object.keys(chargePaymentMethod.successExample.data).sort(), chargeFields)
   assert.deepEqual(Object.keys(chargePaymentMethod.declinedExample.data).sort(), chargeFields)

@@ -1,3 +1,5 @@
+import type { RefundFailureCode } from './errors.js'
+
 /** Optional payer details. Prefilled fields are hidden from the payer in the widget. */
 export interface CheckoutCustomer {
   firstName?: string
@@ -217,6 +219,62 @@ export interface PaymentMethodCharge {
   declineCode: string | null
   /** The transaction the charge created; readable with {@link DominaiteClient.getStatus}. */
   transactionId: string
+  [key: string]: unknown
+}
+
+/** Parameters for {@link DominaiteClient.createRefund}. */
+export interface CreateRefundParams {
+  /**
+   * MINOR units of the payment's currency, at least 1: 2500 is 25.00 EUR, 1500 is 1,500 HUF.
+   * Omit it to refund everything still refundable; the SDK then sends no amount at all.
+   * Partial refunds add up, and may not exceed what is left after earlier refunds and
+   * refunds still in progress.
+   */
+  amount?: number
+  /** Free text stored with the refund, at most 500 characters. */
+  reason?: string
+  /**
+   * Required. Derive it from YOUR refund (the return or credit-note id), never per attempt:
+   * the same key answers the same refund and never refunds twice. A failed refund is final
+   * for its key, so a new attempt needs a new key.
+   */
+  idempotencyKey: string
+}
+
+/**
+ * Every state a refund can be in, in the gateway's own order.
+ *
+ * pending: queued. processing: with the payment provider. succeeded and failed are final;
+ * failed is final for that idempotency key, so a new attempt needs a new key. Treat an
+ * unknown value as still open.
+ */
+export const REFUND_STATUSES = ['pending', 'processing', 'succeeded', 'failed'] as const
+
+export type RefundStatus = (typeof REFUND_STATUSES)[number]
+
+/**
+ * What {@link DominaiteClient.createRefund} and {@link DominaiteClient.getRefund} return. The
+ * gateway omits null fields on the wire; the SDK reads absent as null.
+ */
+export interface Refund {
+  /** re_ followed by 32 hex characters. The same key on the same payment always names the same refund. */
+  refundId: string
+  /** The payment being refunded. */
+  transactionId: string
+  status: RefundStatus | string
+  /**
+   * MINOR units. Before success, the amount requested (null for a full refund); on
+   * succeeded, the amount actually refunded; always null on failed.
+   */
+  amount: number | null
+  /** ISO 4217 code of the payment. */
+  currency: string
+  /** On failed only. Treat a value you do not recognise as REFUND_FAILED. */
+  failureCode: RefundFailureCode | string | null
+  /** On failed only: a fixed English explanation of failureCode. */
+  failureMessage: string | null
+  /** ISO 8601 UTC, when the refund reached succeeded or failed; null before that. */
+  completedAt: string | null
   [key: string]: unknown
 }
 

@@ -19,6 +19,7 @@ test('the CommonJS build exports the same surface', () => {
     'AuthenticationError',
     'CheckoutRefusedError',
     'RateLimitError',
+    'RefundError',
     'StorefrontError',
     'TransportError',
   ]
