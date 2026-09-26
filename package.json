@@ -29,7 +29,7 @@
   "scripts": {
     "build": "npm run clean && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && tsc -p tsconfig.types.json && node scripts/write-dist-package-json.mjs",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "test": "npm run build && node --test test/",
+    "test": "npm run build && node --test test/*.test.mjs test/*.test.cjs",
     "prepare": "npm run build"
   },
   "devDependencies": {
