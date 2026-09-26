@@ -11,6 +11,21 @@
   `charge.*` data carry an integer `sequence` for ordering out-of-order deliveries. Both are
   optional in the types so payloads from a gateway that does not send them yet still parse. The
   README documents the ordering rule.
+- `createRefund(transactionId, { amount?, reason?, idempotencyKey })` and
+  `getRefund(transactionId, refundId)`. The Idempotency-Key is required and signed, as on a
+  charge. Omit `amount` to refund everything still refundable; the SDK then sends no `amount`
+  key. The create answers 202 once the refund is queued; read the outcome with `getRefund()` or
+  wait for `payment.refunded`. A failed refund sends no webhook.
+- `Refund`, `RefundStatus`, `CreateRefundParams`, and `REFUND_STATUSES`, `REFUND_ERROR_CODES` and
+  `REFUND_FAILURE_CODES`, pinned against the contract. A failed refund is a result with
+  `failureCode`, not an exception; `amount`, `failureCode`, `failureMessage` and `completedAt`
+  read absent as null.
+- `RefundError` (extends `ApiError`) for the refund route codes, with `retryable` set for
+  `REFUND_NOT_FOUND` and `DUPLICATE_REQUEST`. `ErrorCodes` gains `PAYMENT_NOT_FOUND`,
+  `REFUND_NOT_FOUND`, `PAYMENT_NOT_REFUNDABLE`, `REFUND_AMOUNT_EXCEEDED` and `REFUND_FAILED`.
+- `storedPaymentMethod` on `payment.*` webhook data, the same `StoredPaymentMethod` as on the
+  status read. Null or absent when no card was saved, and it can be null even when one was: the
+  status read is the source of truth.
 
 ## 0.3.0
 
