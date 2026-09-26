@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   SESSION_REFUSAL_ERROR_CODES,
+  STOREFRONT_ERROR_CODES,
   TRANSACTION_STATUSES,
   VALIDATION_ERROR_CODES,
 } from '../dist/esm/index.js'
@@ -35,6 +36,21 @@ test('the validation codes are exactly the HTTP 400 idempotency codes', () => {
   const expected = codesWithStatus([WIRE.errorCodes.idempotency], 400)
   assert.deepEqual(sorted(VALIDATION_ERROR_CODES), sorted(expected))
   assert.equal(WIRE.validationHttpStatus, 400)
+})
+
+test('the storefront codes are exactly the gateway storefront group, in order, none retryable', () => {
+  assert.deepEqual(
+    [...STOREFRONT_ERROR_CODES],
+    WIRE.errorCodes.storefront.map((entry) => entry.code),
+  )
+  assert.deepEqual(
+    WIRE.errorCodes.storefront.map(({ code, httpStatus, retry }) => [code, httpStatus, retry]),
+    [
+      ['STOREFRONT_MISMATCH', 400, false],
+      ['STOREFRONT_INACTIVE', 409, false],
+      ['STOREFRONT_NOT_WHITELISTED', 409, false],
+    ],
+  )
 })
 
 test('the contract still lists this SDK', () => {

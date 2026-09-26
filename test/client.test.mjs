@@ -781,7 +781,8 @@ test('getStatus passes the stored payment method through and leaves paymentMetho
   })
 
   const status = await makeClient(fetchImpl).getStatus(CHECKOUT.transactionId)
-  assert.deepEqual(status.storedPaymentMethod, storedPaymentMethod)
+  // retiredReason is absent on the wire for a card the platform has not retired: read as null.
+  assert.deepEqual(status.storedPaymentMethod, { ...storedPaymentMethod, retiredReason: null })
   // The gateway's own paymentMethod is a category string, not the card; it is not typed
   // by this SDK but it must not be mistaken for, or clobbered by, the card on file.
   assert.equal(status.paymentMethod, 'card')
@@ -798,6 +799,7 @@ test('getStatus normalises an unreported brand and expiry to null, and adds no k
   const status = await makeClient(unreported.fetchImpl).getStatus(CHECKOUT.transactionId)
   assert.deepEqual(status.storedPaymentMethod, {
     id: PAYMENT_METHOD_ID, brand: null, last4: null, expiryMonth: null, expiryYear: null, status: 'active',
+    retiredReason: null,
   })
 })
 

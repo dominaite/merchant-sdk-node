@@ -45,11 +45,15 @@ export const ErrorCodes = Object.freeze({
   IDEMPOTENCY_KEY_REUSED: 'IDEMPOTENCY_KEY_REUSED',
 } as const)
 
-/** The codes the SDK raises as a {@link StorefrontError}, on sessions and charges alike. */
+/**
+ * The codes the SDK raises as a {@link StorefrontError}, on sessions and charges alike, in
+ * the contract's order: 400 STOREFRONT_MISMATCH, 409 STOREFRONT_INACTIVE, 409
+ * STOREFRONT_NOT_WHITELISTED. None is retryable, and none is a session refusal.
+ */
 export const STOREFRONT_ERROR_CODES = [
-  'STOREFRONT_NOT_WHITELISTED',
-  'STOREFRONT_INACTIVE',
   'STOREFRONT_MISMATCH',
+  'STOREFRONT_INACTIVE',
+  'STOREFRONT_NOT_WHITELISTED',
 ] as const
 
 /** One of the storefront codes this SDK knows about. */
@@ -190,7 +194,7 @@ export type ChargeErrorCode = (typeof CHARGE_ERROR_CODES)[number]
  *   webhook. Never retry under a new key.
  * - CHARGE_FAILED (502): nothing was charged. `charge` is present when a row exists
  *   (its declineClass and declineCode are null), absent when the provider refused before one.
- * - PAYMENT_METHOD_NOT_ACTIVE (409): the method is revoked or expired; ask the customer
+ * - PAYMENT_METHOD_NOT_ACTIVE (409): the method is revoked, expired or retired; ask the customer
  *   for another card via a hosted session with saveCard.
  * - DUPLICATE_REQUEST (409): a request with this key is still in flight; retry with the
  *   SAME key in a moment.

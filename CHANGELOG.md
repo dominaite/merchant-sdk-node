@@ -23,11 +23,17 @@
 - `orderIdempotencyKey()`: builds `{scope}-{orderId}-{amountMinor}-{CURRENCY}`. Same order and
   amount replays the same session; a changed amount gets a new key.
 - `ErrorCodes`: named constants for the storefront codes and the replay and availability codes.
-- `StorefrontError` and `STOREFRONT_ERROR_CODES`.
+- `StorefrontError` and `STOREFRONT_ERROR_CODES`, in the contract's order (`STOREFRONT_MISMATCH`
+  400, `STOREFRONT_INACTIVE` 409, `STOREFRONT_NOT_WHITELISTED` 409) and pinned against its
+  `storefrontErrorCodes`. None is retryable and none is a session refusal.
 - `toMinorUnits()` and `CURRENCY_EXPONENTS`: decimal string to integer minor units with the
   gateway's exponent (HUF is whole forints, unlike ISO 4217), no floating point. An unknown
   currency is an error, and ISK, KRW, OMR, JOD and TND are refused as not supported.
 - `isPaid()` and `isTerminal()` status helpers.
+- Contract refresh (gateway contract 2026-09-16): a stored payment method can be `retired`, and
+  carries `retiredReason` (`hard_decline`, `chargeback` or `source_sale_reversed`, null on every
+  other card). `STORED_PAYMENT_METHOD_RETIRED_REASONS` and the `StoredPaymentMethodRetiredReason`
+  type list them. A retired card is not chargeable and never becomes active again.
 
 ### Changed
 

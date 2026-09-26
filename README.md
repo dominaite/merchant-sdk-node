@@ -424,6 +424,11 @@ Revoking signs an empty key and an empty body, like `getStatus()`. A revoke that
 `storedPaymentMethod` with `status: 'revoked'`, and a charge against it is refused with
 `PAYMENT_METHOD_NOT_ACTIVE`.
 
+The platform can also retire a card on its own: `status: 'retired'`, with `retiredReason` set to
+`hard_decline`, `chargeback` or `source_sale_reversed` (`STORED_PAYMENT_METHOD_RETIRED_REASONS`).
+A retired card is refused with `PAYMENT_METHOD_NOT_ACTIVE` too and never becomes active again,
+so ask the customer to save a card again. `retiredReason` is `null` on every other card.
+
 ## Webhooks
 
 Register an endpoint in the Dominaite dashboard, **Webhooks** tab: an HTTPS URL, the events you

@@ -553,7 +553,10 @@ function toCharge(data: Record<string, unknown>): PaymentMethodCharge {
   }
 }
 
-/** Same rule for the card on file: brand, last4 and the expiry are absent when unreported. */
+/**
+ * Same rule for the card on file: brand, last4 and the expiry are absent when unreported,
+ * and retiredReason is absent unless the platform retired the card.
+ */
 function toStoredPaymentMethod(data: Record<string, unknown>): StoredPaymentMethod {
   return {
     ...data,
@@ -563,6 +566,7 @@ function toStoredPaymentMethod(data: Record<string, unknown>): StoredPaymentMeth
     expiryMonth: typeof data['expiryMonth'] === 'number' ? data['expiryMonth'] : null,
     expiryYear: typeof data['expiryYear'] === 'number' ? data['expiryYear'] : null,
     status: stringOr(data['status'], ''),
+    retiredReason: typeof data['retiredReason'] === 'string' ? data['retiredReason'] : null,
   }
 }
 
