@@ -356,8 +356,22 @@ export interface PaymentWebhookData {
   grossAmount?: number
   surchargeAmount?: number
   currency: string
+  /** How the payer paid: 'card', 'wallet', ... Not the stored card; that is storedPaymentMethod. */
+  paymentMethod?: string | null
+  /** The wallet, e.g. 'apple_pay' or 'google_pay'; set only for wallet payments. */
+  walletType?: string | null
   originalTransactionId?: string | null
   idempotencyKey?: string | null
+  /** Your own order reference; refund and cancel events carry the original payment's. */
+  orderReference?: string | null
+  /** The hosted checkout order id; null for refunds, cancellations and payments outside hosted checkout. */
+  orderId?: string | null
+  /** The description you sent on create session; null on refund and cancellation events. */
+  description?: string | null
+  /** Lower-cased card brand once a card payment was attempted. */
+  paymentMethodBrand?: string | null
+  /** Last four digits once a card payment was attempted. */
+  paymentMethodLast4?: string | null
   /**
    * The card a saveCard payment stored, the same object as
    * {@link CheckoutStatus.storedPaymentMethod}. Set on payment.succeeded (and

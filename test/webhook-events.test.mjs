@@ -38,6 +38,9 @@ test('a payment event carries the stored card, the same shape as on the status r
   assert.ok(STORED_PAYMENT_METHOD_STATUSES.includes(event.data.storedPaymentMethod.status))
   // The payment's own method category stays the string it is.
   assert.equal(event.data.paymentMethod, 'card')
+  assert.equal(event.data.walletType, null)
+  assert.equal(event.data.orderReference, 'order-123')
+  assert.equal(event.data.paymentMethodLast4, '4242')
 })
 
 test('a payment event without a stored card reads null or absent, never a half-built card', () => {
