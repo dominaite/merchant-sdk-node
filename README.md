@@ -429,6 +429,90 @@ The platform can also retire a card on its own: `status: 'retired'`, with `retir
 A retired card is refused with `PAYMENT_METHOD_NOT_ACTIVE` too and never becomes active again,
 so ask the customer to save a card again. `retiredReason` is `null` on every other card.
 
+## Refunds
+
+Refund a payment in full or in part with `createRefund()`. `transactionId` is the id the checkout
+session or the charge returned. The amount is minor units of the payment's currency, so convert
+with `toMinorUnits()`; omit it to refund everything still refundable (the SDK then sends no
+`amount` at all). A refund is always in the payment's currency, and partial refunds add up: the
+amount may not exceed what is left after earlier refunds and refunds still in progress.
+
+```js
+import { ErrorCodes, RefundError, toMinorUnits } from '@dominaite/merchant-sdk'
+
+// 1,500 HUF back on a payment: HUF has no minor unit here, so this is 1500.
+const refund = await client.createRefund(transactionId, {
+  amount: toMinorUnits('1500', 'HUF'),
+  reason: 'Returned item',                   // optional, at most 500 characters
+  idempotencyKey: `refund-${creditNoteId}`,  // required: derive it from YOUR refund
+})
+// refund.status is 'pending': queued, not done yet.
+
+// Everything still refundable:
+await client.createRefund(transactionId, { idempotencyKey: `refund-${creditNoteId}` })
+
+// Later, or while waiting for the webhook:
+const current = await client.getRefund(transactionId, refund.refundId)
+if (current.status === 'succeeded') {
+  // current.amount is what went back to the customer.
+} else if (current.status === 'failed') {
+  // current.amount is null; current.failureCode says why. A new attempt needs a NEW key.
+}
+```
+
+`createRefund()` answers HTTP 202 as soon as the refund is queued. The outcome arrives later:
+read it with `getRefund()` (signed with an empty key and an empty body, like `getStatus()`) or
+wait for `payment.refunded`, which fires once the money has moved. **A refund that fails sends
+no webhook**, so poll `getRefund()` if you need to know about failures.
+
+The `Idempotency-Key` is signed, exactly like a charge. Replaying the same key never refunds
+twice: the gateway answers 202 with the same refund as it stands now, so a replay doubles as a
+status read. The same key with a different amount, reason or payment is refused with
+`IDEMPOTENCY_KEY_REUSED`.
+
+A refund (`Refund`) carries `refundId` (`re_` + 32 hex characters), `transactionId`, `status`,
+`amount`, `currency`, `failureCode`, `failureMessage` and `completedAt`. The gateway omits null
+fields on the wire and the SDK reads absent as null. `amount` is the amount requested on
+`pending` (null for a full refund), the amount being refunded on `processing` (null until a full
+refund has been sized), the amount actually refunded on `succeeded`, and always null on `failed`.
+
+`status` is one of `REFUND_STATUSES`: `pending` (queued), `processing` (with the payment
+provider), `succeeded` or `failed`. The last two are final, and `failed` is final for that key.
+A failed refund is a result, not an exception: `failureCode` is one of `REFUND_FAILURE_CODES`
+(`REFUND_AMOUNT_EXCEEDED`, `PAYMENT_NOT_REFUNDABLE`, `REFUND_FAILED`). Treat a code you do not
+recognise as `REFUND_FAILED`.
+
+When the gateway refuses the request itself, the SDK throws `RefundError` (an `ApiError`) with
+`errorCode`, `httpStatus` and `retryable`:
+
+| `errorCode` | HTTP | What to do |
+|---|---|---|
+| `PAYMENT_NOT_FOUND` | 404 | No card-not-present payment with this id under your account. |
+| `REFUND_NOT_FOUND` | 404 | `getRefund()` only. Right after the 202 the refund may not be picked up yet: poll again for up to 60 seconds. `retryable` is true. |
+| `PAYMENT_NOT_REFUNDABLE` | 422 | Not paid, already fully refunded, or everything left is already being refunded. Nothing was queued; the key is not burnt. |
+| `REFUND_AMOUNT_EXCEEDED` | 422 | More than what is left to refund; the message names the amount left. Nothing was queued; the key is not burnt. |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | The key was first used for a different refund. Use a fresh key. |
+| `DUPLICATE_REQUEST` | 409 | A request with this key is still being processed. Retry with the **same** key after a second, for up to 120 seconds. `retryable` is true. |
+| `IDEMPOTENCY_KEY_REQUIRED` | 400 | The key was missing or too long. |
+
+A 500 means nothing was queued and arrives as `TransportError`: retry with the **same** key.
+
+```js
+try {
+  await client.createRefund(transactionId, { amount, idempotencyKey })
+} catch (error) {
+  if (error instanceof RefundError && error.errorCode === ErrorCodes.REFUND_AMOUNT_EXCEEDED) {
+    // Ask for a smaller amount; the same key can be used again.
+  } else if (error instanceof RefundError && error.retryable) {
+    // DUPLICATE_REQUEST: try again shortly with the same key.
+  }
+}
+```
+
+On `payment.refunded`, `data.transactionId` is the refund's own transaction id, `data.amount` is
+that refund's amount, and `data.originalTransactionId` is the payment it refunds. There is one
+event per completed refund, partial or full.
+
 ## Webhooks
 
 Register an endpoint in the Dominaite dashboard, **Webhooks** tab: an HTTPS URL, the events you
@@ -470,6 +554,15 @@ The body is flat JSON, with no `success` wrapper to branch on:
 
 Amounts are minor units. On `payment.*` the `amount` is what you are paid and `grossAmount` is the
 card movement; on `payment.refunded` the `amount` is what went back to the customer.
+
+`payment.*` data also carries `storedPaymentMethod`: the card a `saveCard` payment stored, the
+same object as `storedPaymentMethod` on `getStatus()` (`id`, `brand`, `last4`, `expiryMonth`,
+`expiryYear`, `status`, `retiredReason`). It is set on `payment.succeeded` (and
+`payment.requires_capture` for an authorization) when the card was stored together with the
+approval, and null or absent on every other event and whenever no card was saved. It can also be
+null when a card **was** saved, because a card can be stored after the approval was already
+announced. The status read is the source of truth: on a `saveCard` payment whose event has no
+`storedPaymentMethod`, call `getStatus()` to pick the card up.
 
 `apiVersion` is the dated version of the payload shapes. A new date means a breaking change to the
 envelope or a `data` shape; added fields keep the current date. A gateway that predates it does not
@@ -636,6 +729,7 @@ Everything thrown by the SDK extends `DominaiteError`.
 |---|---|---|
 | `CheckoutRefusedError` | The API answered, `success: false`. `errorCode` carries the reason. | Branch on `errorCode`. Do not blind-retry. |
 | `StorefrontError` | 409 or 400 about the website the payment belongs to. `errorCode` is a storefront code, see below. Extends `ApiError`. | Fix the storefront setup. Retrying does not help. |
+| `RefundError` | A refund route refused with one of the refund codes. Extends `ApiError`; `retryable` says whether the same request can succeed later. | See [Refunds](#refunds). |
 | `AuthenticationError` | 401/403. `errorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
 | `RateLimitError` | 429. You went over 60 requests/min for the key or 120/min for the IP. `retryAfterSeconds` carries `Retry-After` when it was a whole number of seconds, else `null`. | Wait `retryAfterSeconds` (or your own backoff), then send it again with the **same** idempotency key. The SDK does not retry this for you. |
 | `TransportError` | Network failure, timeout, 5xx (`MERCHANT_API_UNAVAILABLE`), or a response body over 10MB. | Retry with the **same** idempotency key, and expect a replay refusal if the first attempt did land. |

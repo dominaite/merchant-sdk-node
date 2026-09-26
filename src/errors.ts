@@ -29,7 +29,8 @@ export class AuthenticationError extends DominaiteError {
  *   if (error instanceof StorefrontError && error.errorCode === ErrorCodes.STOREFRONT_NOT_WHITELISTED)
  *
  * The replay and availability codes arrive on {@link CheckoutRefusedError} (sessions) or
- * {@link ChargeError} (charges); the storefront codes on {@link StorefrontError}.
+ * {@link ChargeError} (charges); the storefront codes on {@link StorefrontError}; the refund
+ * codes on {@link RefundError} or on a failed refund's failureCode.
  */
 export const ErrorCodes = Object.freeze({
   /** 409: the storefront's domain is not whitelisted at the payment provider yet. */
@@ -43,6 +44,16 @@ export const ErrorCodes = Object.freeze({
   DUPLICATE_REQUEST: 'DUPLICATE_REQUEST',
   PAYMENT_PROCESSING_UNAVAILABLE: 'PAYMENT_PROCESSING_UNAVAILABLE',
   IDEMPOTENCY_KEY_REUSED: 'IDEMPOTENCY_KEY_REUSED',
+  /** 404 on the refund routes: no such payment under your account. */
+  PAYMENT_NOT_FOUND: 'PAYMENT_NOT_FOUND',
+  /** 404 on getRefund: not picked up yet (poll for up to 60 seconds), or an unknown id. */
+  REFUND_NOT_FOUND: 'REFUND_NOT_FOUND',
+  /** 422 on createRefund, or a failed refund's failureCode. */
+  PAYMENT_NOT_REFUNDABLE: 'PAYMENT_NOT_REFUNDABLE',
+  /** 422 on createRefund, or a failed refund's failureCode. */
+  REFUND_AMOUNT_EXCEEDED: 'REFUND_AMOUNT_EXCEEDED',
+  /** A failed refund's failureCode; never an HTTP error. */
+  REFUND_FAILED: 'REFUND_FAILED',
 } as const)
 
 /**
@@ -258,6 +269,75 @@ export class RevokeError extends DominaiteError {
     super(message)
     this.httpStatus = httpStatus
     this.errorCode = errorCode
+    this.result = result
+  }
+}
+
+/**
+ * The codes {@link DominaiteClient.createRefund} and {@link DominaiteClient.getRefund} raise
+ * as a {@link RefundError}, in the contract's order. A 500 on a refund route is not one of
+ * them: it means nothing was queued, and arrives as a {@link TransportError} (retry with the
+ * SAME key).
+ */
+export const REFUND_ERROR_CODES = [
+  'PAYMENT_NOT_FOUND',
+  'REFUND_NOT_FOUND',
+  'PAYMENT_NOT_REFUNDABLE',
+  'REFUND_AMOUNT_EXCEEDED',
+  'IDEMPOTENCY_KEY_REUSED',
+  'DUPLICATE_REQUEST',
+  'IDEMPOTENCY_KEY_REQUIRED',
+] as const
+
+/** One of the refund error codes this SDK knows about. Unknown codes arrive as plain strings. */
+export type RefundErrorCode = (typeof REFUND_ERROR_CODES)[number]
+
+/** The refund error codes worth retrying, each within its own window (see {@link RefundError}). */
+const RETRYABLE_REFUND_ERROR_CODES: ReadonlySet<string> = new Set<RefundErrorCode>([
+  'REFUND_NOT_FOUND',
+  'DUPLICATE_REQUEST',
+])
+
+/**
+ * Why a refund ended up failed, on {@link Refund.failureCode}, in the contract's order. Not
+ * an exception: a failed refund is a result, read with getRefund(). Treat a value you do not
+ * recognise as REFUND_FAILED.
+ */
+export const REFUND_FAILURE_CODES = ['REFUND_AMOUNT_EXCEEDED', 'PAYMENT_NOT_REFUNDABLE', 'REFUND_FAILED'] as const
+
+/** One of the refund failure codes this SDK knows about. Unknown codes arrive as plain strings. */
+export type RefundFailureCode = (typeof REFUND_FAILURE_CODES)[number]
+
+/**
+ * The gateway answered a refund route with an error code instead of a refund. A subclass of
+ * {@link ApiError}, so an existing `instanceof ApiError` branch still catches it. The HTTP
+ * status is on `httpStatus`, the code on `errorCode`, and `retryable` says whether sending the
+ * same request again can help. Branch on `errorCode`:
+ * - PAYMENT_NOT_FOUND (404): no card-not-present payment with this id under your account.
+ * - REFUND_NOT_FOUND (404, getRefund only, retryable): right after the 202 the refund may not
+ *   be picked up yet. Poll again for up to 60 seconds; after that the id is unknown.
+ * - PAYMENT_NOT_REFUNDABLE (422): not paid, already fully refunded, or everything left is
+ *   already being refunded. Nothing was queued and the key is not burnt.
+ * - REFUND_AMOUNT_EXCEEDED (422): more than what is left to refund, counting refunds in
+ *   progress; the message names the amount left. Nothing was queued and the key is not burnt.
+ * - IDEMPOTENCY_KEY_REUSED (422): the key was first used for a different amount, reason or
+ *   payment. Use a fresh key for a genuinely new refund.
+ * - DUPLICATE_REQUEST (409, retryable): a request with this key is still being processed.
+ *   Retry with the SAME key after a second, for up to 120 seconds.
+ * - IDEMPOTENCY_KEY_REQUIRED (400): the key was missing or too long.
+ *
+ * `result` is the whole envelope the gateway sent, for fields not modelled above.
+ */
+export class RefundError extends ApiError {
+  declare readonly errorCode: string
+  /** True for REFUND_NOT_FOUND and DUPLICATE_REQUEST: the same request can succeed later. */
+  readonly retryable: boolean
+  /** The full envelope, for fields not modelled above. */
+  readonly result: Record<string, unknown>
+
+  constructor(httpStatus: number, errorCode: string, message: string, result: Record<string, unknown> = {}) {
+    super(httpStatus, message, errorCode)
+    this.retryable = RETRYABLE_REFUND_ERROR_CODES.has(errorCode)
     this.result = result
   }
 }

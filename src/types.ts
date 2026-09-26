@@ -1,3 +1,5 @@
+import type { RefundFailureCode } from './errors.js'
+
 /** Optional payer details. Prefilled fields are hidden from the payer in the widget. */
 export interface CheckoutCustomer {
   firstName?: string
@@ -220,6 +222,63 @@ export interface PaymentMethodCharge {
   [key: string]: unknown
 }
 
+/** Parameters for {@link DominaiteClient.createRefund}. */
+export interface CreateRefundParams {
+  /**
+   * MINOR units of the payment's currency, at least 1: 2500 is 25.00 EUR, 1500 is 1,500 HUF.
+   * Omit it to refund everything still refundable; the SDK then sends no amount at all.
+   * Partial refunds add up, and may not exceed what is left after earlier refunds and
+   * refunds still in progress.
+   */
+  amount?: number
+  /** Free text stored with the refund, at most 500 characters. */
+  reason?: string
+  /**
+   * Required. Derive it from YOUR refund (the return or credit-note id), never per attempt:
+   * the same key answers the same refund and never refunds twice. A failed refund is final
+   * for its key, so a new attempt needs a new key.
+   */
+  idempotencyKey: string
+}
+
+/**
+ * Every state a refund can be in, in the gateway's own order.
+ *
+ * pending: queued. processing: with the payment provider. succeeded and failed are final;
+ * failed is final for that idempotency key, so a new attempt needs a new key. Treat an
+ * unknown value as still open.
+ */
+export const REFUND_STATUSES = ['pending', 'processing', 'succeeded', 'failed'] as const
+
+export type RefundStatus = (typeof REFUND_STATUSES)[number]
+
+/**
+ * What {@link DominaiteClient.createRefund} and {@link DominaiteClient.getRefund} return. The
+ * gateway omits null fields on the wire; the SDK reads absent as null.
+ */
+export interface Refund {
+  /** re_ followed by 32 hex characters. The same key on the same payment always names the same refund. */
+  refundId: string
+  /** The payment being refunded. */
+  transactionId: string
+  status: RefundStatus | string
+  /**
+   * MINOR units. On pending, the amount requested (null for a full refund); on processing,
+   * the amount being refunded (null until a full refund has been sized); on succeeded, the
+   * amount actually refunded; always null on failed.
+   */
+  amount: number | null
+  /** ISO 4217 code of the payment. */
+  currency: string
+  /** On failed only. Treat a value you do not recognise as REFUND_FAILED. */
+  failureCode: RefundFailureCode | string | null
+  /** On failed only: a fixed English explanation of failureCode. */
+  failureMessage: string | null
+  /** ISO 8601 UTC, when the refund reached succeeded or failed; null before that. */
+  completedAt: string | null
+  [key: string]: unknown
+}
+
 /** What {@link DominaiteClient.ping} returns: proof your key, signing and clock are good. */
 export interface Ping {
   /** Always true on a 200. */
@@ -298,8 +357,33 @@ export interface PaymentWebhookData {
   grossAmount?: number
   surchargeAmount?: number
   currency: string
+  /** How the payer paid: 'card', 'wallet', ... Not the stored card; that is storedPaymentMethod. */
+  paymentMethod?: string | null
+  /** The wallet, e.g. 'apple_pay' or 'google_pay'; set only for wallet payments. */
+  walletType?: string | null
   originalTransactionId?: string | null
   idempotencyKey?: string | null
+  /** Your own order reference; refund and cancel events carry the original payment's. */
+  orderReference?: string | null
+  /** The hosted checkout order id; null for refunds, cancellations and payments outside hosted checkout. */
+  orderId?: string | null
+  /** The description you sent on create session; null on refund and cancellation events. */
+  description?: string | null
+  /** Lower-cased card brand once a card payment was attempted. */
+  paymentMethodBrand?: string | null
+  /** Last four digits once a card payment was attempted. */
+  paymentMethodLast4?: string | null
+  /**
+   * The card a saveCard payment stored, the same object as
+   * {@link CheckoutStatus.storedPaymentMethod}. Set on payment.succeeded (and
+   * payment.requires_capture for an authorization) when the card was stored together with
+   * the approval; null or absent on every other event and when no card was saved.
+   *
+   * It can also be null when a card WAS saved: a card can be stored after the approval was
+   * already announced. The status read is the source of truth, so on a saveCard payment
+   * whose event has no storedPaymentMethod, call getStatus() to pick the card up.
+   */
+  storedPaymentMethod?: StoredPaymentMethod | null
   [key: string]: unknown
 }
 

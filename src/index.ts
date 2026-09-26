@@ -8,6 +8,9 @@ export {
   DominaiteError,
   ErrorCodes,
   RateLimitError,
+  REFUND_ERROR_CODES,
+  REFUND_FAILURE_CODES,
+  RefundError,
   REVOKE_ERROR_CODES,
   RevokeError,
   SESSION_REFUSAL_ERROR_CODES,
@@ -18,6 +21,8 @@ export {
 } from './errors.js'
 export type {
   ChargeErrorCode,
+  RefundErrorCode,
+  RefundFailureCode,
   RevokeErrorCode,
   SessionRefusalErrorCode,
   StorefrontErrorCode,
@@ -33,6 +38,7 @@ export { parseWebhookEvent, verifyWebhook } from './webhooks.js'
 export {
   CHARGE_STATUSES,
   DECLINE_CLASSES,
+  REFUND_STATUSES,
   STORED_PAYMENT_METHOD_RETIRED_REASONS,
   STORED_PAYMENT_METHOD_STATUSES,
   TRANSACTION_STATUSES,
@@ -48,6 +54,7 @@ export type {
   CheckoutSession,
   CheckoutStatus,
   CreateCheckoutSessionParams,
+  CreateRefundParams,
   DeclineClass,
   DominaiteClientOptions,
   DominaiteWebhookEvent,
@@ -55,6 +62,8 @@ export type {
   PaymentWebhookData,
   PaymentWebhookEvent,
   Ping,
+  Refund,
+  RefundStatus,
   RetryOptions,
   StoredPaymentMethod,
   StoredPaymentMethodRetiredReason,
