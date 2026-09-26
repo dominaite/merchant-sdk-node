@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.3.1 (unreleased)
+## 0.3.1
+
+0.3.0 never reached npm (its publish run failed), so this is the first npm release since 0.2.0 and
+includes everything listed under 0.3.0 below.
 
 ### Added
 
