@@ -263,8 +263,9 @@ export interface Refund {
   transactionId: string
   status: RefundStatus | string
   /**
-   * MINOR units. Before success, the amount requested (null for a full refund); on
-   * succeeded, the amount actually refunded; always null on failed.
+   * MINOR units. On pending, the amount requested (null for a full refund); on processing,
+   * the amount being refunded (null until a full refund has been sized); on succeeded, the
+   * amount actually refunded; always null on failed.
    */
   amount: number | null
   /** ISO 4217 code of the payment. */

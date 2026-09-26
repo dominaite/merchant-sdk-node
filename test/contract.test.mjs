@@ -537,7 +537,7 @@ test('createRefund() returns the partial and full contract examples, absent fiel
     assert.equal(calls[0].init.method, createRefund.method)
     assert.equal(calls[0].init.headers['Idempotency-Key'], REFUND_KEY)
   }
-  // The full example is a full refund: no amount until it succeeds.
+  // The full example is a pending full refund: no amount yet.
   assert.equal('amount' in createRefund.fullExample.data, false)
 })
 

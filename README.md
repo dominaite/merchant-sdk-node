@@ -472,9 +472,9 @@ status read. The same key with a different amount, reason or payment is refused 
 
 A refund (`Refund`) carries `refundId` (`re_` + 32 hex characters), `transactionId`, `status`,
 `amount`, `currency`, `failureCode`, `failureMessage` and `completedAt`. The gateway omits null
-fields on the wire and the SDK reads absent as null. `amount` is the amount requested before
-success (null for a full refund), the amount actually refunded on `succeeded`, and always null on
-`failed`.
+fields on the wire and the SDK reads absent as null. `amount` is the amount requested on
+`pending` (null for a full refund), the amount being refunded on `processing` (null until a full
+refund has been sized), the amount actually refunded on `succeeded`, and always null on `failed`.
 
 `status` is one of `REFUND_STATUSES`: `pending` (queued), `processing` (with the payment
 provider), `succeeded` or `failed`. The last two are final, and `failed` is final for that key.
