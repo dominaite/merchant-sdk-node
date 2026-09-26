@@ -1,0 +1,61 @@
+name: Publish to npm
+
+# Publishing is keyless: npm trusts this repo + this workflow file through a Trusted
+# Publisher on the package and swaps GitHub's OIDC token for a short-lived publish
+# credential at run time, so there is no NPM_TOKEN secret to store, rotate or leak.
+# Provenance is attached automatically (public repo, public package).
+#
+# One-time setup on npmjs.com: @dominaite/merchant-sdk -> Settings -> Trusted Publisher
+# -> GitHub Actions, then enter exactly (all fields are case-sensitive):
+#   Organization or user: dominaite
+#   Repository:           merchant-sdk-node
+#   Workflow filename:    publish.yml
+#   Environment name:     npm
+#
+# npm also checks that package.json's repository.url points at this repo.
+# Trusted publishing needs npm >= 11.5.1 and Node >= 22.14.0, hence Node 24 and the
+# npm upgrade below.
+#
+# Tag push = release. The tag (minus the v) must equal package.json's version.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write # required: GitHub mints the OIDC token npm exchanges for a publish credential
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm to a trusted-publishing capable version
+        run: |
+          npm install -g npm@^11.5.1
+          npm --version
+
+      - name: Refuse a tag that disagrees with the package version
+        run: |
+          package_version=$(node -p "require('./package.json').version")
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$package_version" != "$tag_version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $package_version - bump package.json or retag."
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - name: Run the test suite first
+        run: npm test
+
+      # prepare rebuilds dist before the tarball is packed.
+      - name: Publish (trusted publishing, no tokens)
+        run: npm publish --access public
