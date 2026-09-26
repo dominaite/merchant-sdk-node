@@ -358,6 +358,17 @@ export interface PaymentWebhookData {
   currency: string
   originalTransactionId?: string | null
   idempotencyKey?: string | null
+  /**
+   * The card a saveCard payment stored, the same object as
+   * {@link CheckoutStatus.storedPaymentMethod}. Set on payment.succeeded (and
+   * payment.requires_capture for an authorization) when the card was stored together with
+   * the approval; null or absent on every other event and when no card was saved.
+   *
+   * It can also be null when a card WAS saved: a card can be stored after the approval was
+   * already announced. The status read is the source of truth, so on a saveCard payment
+   * whose event has no storedPaymentMethod, call getStatus() to pick the card up.
+   */
+  storedPaymentMethod?: StoredPaymentMethod | null
   [key: string]: unknown
 }
 
