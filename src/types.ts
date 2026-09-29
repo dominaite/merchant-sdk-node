@@ -32,6 +32,15 @@ export interface CreateCheckoutSessionParams {
    */
   saveCard?: boolean
   /**
+   * How the payer enters the card. 'widget' (the default when omitted) is the hosted
+   * cashier widget; 'fields' renders card fields in your own page with checkout.js.
+   * Card fields are enabled per merchant on request; 'fields' on an account without them
+   * is rejected with a 400. Part of the idempotency identity: replaying a key with a
+   * different integration is refused with IDEMPOTENCY_KEY_REUSED. Omitted from the body
+   * when not set.
+   */
+  integration?: CheckoutIntegration
+  /**
    * Required. Derive it from the order with orderIdempotencyKey(), never per attempt:
    * the same key replays the same session, so a reload, a back button or a retry after
    * a timeout never creates a second payment. A new amount needs a new key.
@@ -57,8 +66,25 @@ export interface CheckoutSession {
   currency: string
   /** ISO 8601. Sessions are valid for 2 hours. */
   expiresAt: string
+  /** The integration in effect: 'widget' or 'fields'. Always present on a session. */
+  integration: CheckoutIntegration | string
+  /**
+   * Present only when integration is 'fields': an opaque string of at most 128 characters,
+   * the same on every replay of the session. Hand it to the payer's page for checkout.js,
+   * which sends it as its bearer credential. Do not log or store it. Absent (null) for
+   * 'widget'.
+   */
+  clientSecret?: string | null
   [key: string]: unknown
 }
+
+/**
+ * The values {@link CreateCheckoutSessionParams.integration} accepts, pinned against the
+ * contract's integrationVocabulary.
+ */
+export const CHECKOUT_INTEGRATIONS = ['widget', 'fields'] as const
+
+export type CheckoutIntegration = (typeof CHECKOUT_INTEGRATIONS)[number]
 
 /**
  * Every status the merchant API can report, in the gateway's own order.

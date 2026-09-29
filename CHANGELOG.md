@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.2 (unreleased)
+
+### Added
+
+- Card fields: `integration` on `createCheckoutSession` (`'widget'` or `'fields'`, left out of the
+  body when not set), and `integration` and `clientSecret` on the returned `CheckoutSession`.
+  `clientSecret` is set only for fields sessions. `CHECKOUT_INTEGRATIONS` and
+  `CheckoutIntegration` are exported. Card fields are enabled per merchant on request; see the
+  README.
+- Contract fixture: `integrationVocabulary`, the two new checkout fields and a fields session
+  example.
+
 ## 0.3.1
 
 0.3.0 never reached npm (its publish run failed), so this is the first npm release since 0.2.0 and
