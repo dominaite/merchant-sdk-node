@@ -163,7 +163,8 @@ node create-session.mjs
 ```
 
 The session carries `transactionId`, `orderId`, `cashierKey`, `cashierToken`, `amount`,
-`currency` and `expiresAt`. Render the widget with the two cashier fields:
+`currency`, `expiresAt` and `integration` (plus `clientSecret` for card fields, see "Card fields"
+below). Render the widget with the two cashier fields:
 
 ```html
 <div id="checkout"></div>
@@ -312,6 +313,58 @@ So the timeout path can get either a session or a refusal. When the refusal name
 A session is valid for 2 hours. If the payer comes back later, create a new session - and from a
 few minutes past `expiresAt` you can re-POST the **same** idempotency key to get one, so keep the
 order-derived key for the life of the order (see "Recovering from a replay refusal").
+
+## Card fields
+
+Instead of the hosted widget, you can render card fields inside your own checkout page. Card
+fields are enabled per merchant on request: ask Dominaite support to switch them on. Until then a
+session with `integration: 'fields'` is rejected with a 400 (`INVALID_SELECTION` on
+`integration`).
+
+Pass `integration: 'fields'` when you create the session. Leave it out (or pass `'widget'`) for
+the hosted widget. It is part of the idempotency identity, so a replay of the same key with a
+different `integration` is refused with `IDEMPOTENCY_KEY_REUSED`.
+
+```js
+const session = await client.createCheckoutSession({
+  amount: 8440,
+  currency: 'EUR',
+  orderReference: 'order-1042',
+  integration: 'fields',
+  idempotencyKey: orderIdempotencyKey({
+    scope: 'checkout',
+    orderId: 'order-1042',
+    amountMinor: 8440,
+    currency: 'EUR',
+  }),
+})
+// session.integration === 'fields', session.clientSecret is set
+```
+
+Hand `transactionId`, `integration`, `cashierKey`, `cashierToken` and `clientSecret` to the
+payer's page, load the drop-in and mount it:
+
+```html
+<div id="checkout"></div>
+<script src="https://pay.dominaite.com/v1/checkout.js"></script>
+<script>
+  const checkout = Dominaite.checkout({
+    transactionId: 'TRANSACTION_ID_FROM_SESSION',
+    integration: 'fields',
+    cashierKey: 'CASHIER_KEY_FROM_SESSION',
+    cashierToken: 'CASHIER_TOKEN_FROM_SESSION',
+    clientSecret: 'CLIENT_SECRET_FROM_SESSION',
+  })
+  checkout.on('success', () => { /* show a "thank you, confirming" state */ })
+  checkout.mount('#checkout')
+</script>
+```
+
+`clientSecret` is what lets the browser charge this one session: treat it like `cashierToken`,
+keep it out of logs and HTML-escape it. A widget session has no `clientSecret`.
+
+The page saying "success" is not proof of payment. Mark the order paid only from the
+`payment.succeeded` webhook or a `getStatus()` read, exactly as with the widget.
 
 ## Stored payment methods (recurring)
 
