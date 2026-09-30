@@ -55,6 +55,7 @@ const CHECKOUT = {
   amount: 2500,
   currency: 'EUR',
   expiresAt: '2026-08-16T12:00:00Z',
+  integration: 'widget',
 }
 
 const SESSION_PARAMS = {
@@ -764,6 +765,36 @@ test('saveCard is sent in the session body and nowhere else', async () => {
     idempotencyKey: VECTOR.idempotencyKey,
     body: init.body,
   }))
+})
+
+test('integration is sent in the signed session body when set', async () => {
+  for (const integration of ['widget', 'fields']) {
+    const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+    await makeClient(fetchImpl).createCheckoutSession({ ...SESSION_PARAMS, integration })
+
+    const { init } = calls[0]
+    assert.equal(JSON.parse(init.body).integration, integration)
+    assert.equal(init.headers['X-Signature'], signRequest({
+      secret: VECTOR.secret,
+      timestamp: init.headers['X-Timestamp'],
+      method: 'POST',
+      path: DominaiteClient.SESSIONS_PATH,
+      idempotencyKey: VECTOR.idempotencyKey,
+      body: init.body,
+    }))
+  }
+})
+
+test('integration is left out of the session body when not set', async () => {
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
+  await makeClient(fetchImpl).createCheckoutSession({ ...SESSION_PARAMS })
+  assert.equal('integration' in JSON.parse(calls[0].init.body), false)
+
+  const { fetchImpl: fetchUndefined, calls: undefinedCalls } = recordingFetch({
+    body: { success: true, checkout: CHECKOUT },
+  })
+  await makeClient(fetchUndefined).createCheckoutSession({ ...SESSION_PARAMS, integration: undefined })
+  assert.equal('integration' in JSON.parse(undefinedCalls[0].init.body), false)
 })
 
 test('getStatus passes the stored payment method through and leaves paymentMethod the string it is', async () => {

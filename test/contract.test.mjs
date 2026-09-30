@@ -7,6 +7,7 @@ import {
   ApiError,
   CHARGE_ERROR_CODES,
   CHARGE_STATUSES,
+  CHECKOUT_INTEGRATIONS,
   ChargeError,
   CheckoutRefusedError,
   DECLINE_CLASSES,
@@ -90,12 +91,37 @@ test('createCheckoutSession() returns the checkout out of the contract success e
   })
 
   assert.deepEqual(session, example.checkout)
+  assert.equal(session.integration, 'widget')
+  // clientSecret is null for a widget session, so the gateway leaves it off the wire.
+  assert.equal(session.clientSecret ?? null, null)
+  assert.equal(calls[0].url, BASE_URL + CONTRACT.endpoints.createCheckoutSession.path)
+  assert.equal(calls[0].init.method, CONTRACT.endpoints.createCheckoutSession.method)
+})
+
+test('createCheckoutSession() returns the card-fields checkout with integration and clientSecret', async () => {
+  const example = CONTRACT.endpoints.createCheckoutSession.fieldsSuccessExample
+  const { fetchImpl, calls } = recordingFetch(example)
+
+  const session = await makeClient(fetchImpl).createCheckoutSession({
+    amount: 8440,
+    currency: 'EUR',
+    orderReference: 'order-1042',
+    integration: 'fields',
+    idempotencyKey: 'checkout-order-1042-8440-EUR',
+  })
+
+  assert.deepEqual(session, example.checkout)
   assert.deepEqual(
     Object.keys(session).sort(),
     [...CONTRACT.endpoints.createCheckoutSession.checkoutFields].sort(),
   )
-  assert.equal(calls[0].url, BASE_URL + CONTRACT.endpoints.createCheckoutSession.path)
-  assert.equal(calls[0].init.method, CONTRACT.endpoints.createCheckoutSession.method)
+  assert.equal(session.integration, 'fields')
+  assert.equal(session.clientSecret, example.checkout.clientSecret)
+  assert.equal(JSON.parse(calls[0].init.body).integration, 'fields')
+})
+
+test('the integration values are exactly the contract, in order', () => {
+  assert.deepEqual([...CHECKOUT_INTEGRATIONS], CONTRACT.integrationVocabulary)
 })
 
 test('the contract refusal example raises CheckoutRefusedError, not a session', async () => {
@@ -605,10 +631,20 @@ test('the contract examples themselves carry exactly their declared fields', () 
     Object.keys(createCheckoutSession.refusalExample).sort(),
     [...createCheckoutSession.fields].sort(),
   )
+  // The widget example is in wire form: its null clientSecret is absent.
   assert.deepEqual(
     Object.keys(createCheckoutSession.successExample.checkout).sort(),
+    createCheckoutSession.checkoutFields.filter((field) => field !== 'clientSecret').sort(),
+  )
+  assert.deepEqual(
+    Object.keys(createCheckoutSession.fieldsSuccessExample).sort(),
+    [...createCheckoutSession.fields].sort(),
+  )
+  assert.deepEqual(
+    Object.keys(createCheckoutSession.fieldsSuccessExample.checkout).sort(),
     [...createCheckoutSession.checkoutFields].sort(),
   )
+  assert.ok(createCheckoutSession.fieldsSuccessExample.checkout.clientSecret.length <= 128)
   assert.deepEqual(Object.keys(getStatus.example).sort(), [...getStatus.fields].sort())
   assert.deepEqual(Object.keys(getStatus.savedCardExample).sort(), [...getStatus.fields].sort())
   assert.deepEqual(

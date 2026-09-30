@@ -37,6 +37,7 @@ export { isPaid, isTerminal } from './status.js'
 export { parseWebhookEvent, verifyWebhook } from './webhooks.js'
 export {
   CHARGE_STATUSES,
+  CHECKOUT_INTEGRATIONS,
   DECLINE_CLASSES,
   REFUND_STATUSES,
   STORED_PAYMENT_METHOD_RETIRED_REASONS,
@@ -51,6 +52,7 @@ export type {
   ChargeWebhookData,
   ChargeWebhookEvent,
   CheckoutCustomer,
+  CheckoutIntegration,
   CheckoutSession,
   CheckoutStatus,
   CreateCheckoutSessionParams,
