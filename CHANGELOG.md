@@ -9,8 +9,11 @@
   `clientSecret` is set only for fields sessions. `CHECKOUT_INTEGRATIONS` and
   `CheckoutIntegration` are exported. Card fields are enabled per merchant on request; see the
   README.
-- `pspReference` (`string | null`, optional) on `CheckoutStatus` and on the data of payment.* webhook
-  events: the payment processor's reference for the transaction. Not on charge.* events.
+- Processor reference: `pspReference` (`string | null`, optional) on `CheckoutStatus` and on
+  `payment.*` webhook data. The payment processor's reference for the transaction, null until
+  known and on a sale settled by reconciliation without a processor webhook. Refund and cancel
+  events carry the original sale's reference. Not on `charge.*` events.
+- Contract fixture: `pspReference` in the status read fields and examples.
 - Contract fixture: `integrationVocabulary`, the two new checkout fields and a fields session
   example.
 
