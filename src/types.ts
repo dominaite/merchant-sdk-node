@@ -114,12 +114,6 @@ export interface CheckoutStatus {
   transactionId: string
   orderId: string
   orderReference?: string
-  /**
-   * The payment processor's reference for the transaction. null until known, and null for a
-   * sale settled by reconciliation without a processor webhook; refund and cancel events carry
-   * the original sale's reference. Absent on a gateway that predates it.
-   */
-  pspReference?: string | null
   status: TransactionStatus | string
   /** MINOR units. */
   amount: number
@@ -140,6 +134,12 @@ export interface CheckoutStatus {
    * category of how the payer paid ('card', 'wallet', ...) and passes through untyped.
    */
   storedPaymentMethod?: StoredPaymentMethod | null
+  /**
+   * The payment processor's reference for the transaction. null until known, and null for a
+   * sale settled by reconciliation without a processor webhook; refund and cancel events carry
+   * the original sale's reference. Absent on a gateway that predates it.
+   */
+  pspReference?: string | null
   [key: string]: unknown
 }
 
