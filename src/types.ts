@@ -134,6 +134,12 @@ export interface CheckoutStatus {
    * category of how the payer paid ('card', 'wallet', ...) and passes through untyped.
    */
   storedPaymentMethod?: StoredPaymentMethod | null
+  /**
+   * The payment processor's reference for the transaction. null until known, and null for a
+   * sale settled by reconciliation without a processor webhook; refund and cancel events carry
+   * the original sale's reference. Absent on a gateway that predates it.
+   */
+  pspReference?: string | null
   [key: string]: unknown
 }
 
@@ -393,6 +399,12 @@ export interface PaymentWebhookData {
   orderReference?: string | null
   /** The hosted checkout order id; null for refunds, cancellations and payments outside hosted checkout. */
   orderId?: string | null
+  /**
+   * The payment processor's reference for the transaction. null until known, and null for a
+   * sale settled by reconciliation without a processor webhook; refund and cancel events carry
+   * the original sale's reference. Absent on a gateway that predates it.
+   */
+  pspReference?: string | null
   /** The description you sent on create session; null on refund and cancellation events. */
   description?: string | null
   /** Lower-cased card brand once a card payment was attempted. */

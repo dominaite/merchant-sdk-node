@@ -23,6 +23,16 @@ const CHARGE_EVENT =
 const SAVED_CARD_EVENT =
   '{"id":"5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f","type":"payment.succeeded","apiVersion":"2026-09-25","createdAt":"2026-09-25T10:00:00Z","data":{"transactionId":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","status":"succeeded","previousStatus":"pending","kind":"sale","amount":8440,"grossAmount":8440,"surchargeAmount":null,"currency":"EUR","paymentMethod":"card","walletType":null,"originalTransactionId":null,"idempotencyKey":"order-123","orderReference":"order-123","orderId":"ord_1","description":null,"paymentMethodBrand":"visa","paymentMethodLast4":"4242","storedPaymentMethod":{"id":"pm_0123456789abcdef0123456789abcdef","brand":"visa","last4":"4242","expiryMonth":12,"expiryYear":2030,"status":"active","retiredReason":null}}}'
 
+test('a payment event carries pspReference when set, and parses with it null or absent', () => {
+  const withKey = (value) =>
+    SAVED_CARD_EVENT.replace('"orderReference":"order-123"', `"orderReference":"order-123","pspReference":${value}`)
+  assert.equal(parseWebhookEvent(withKey('"psp-9001"')).data.pspReference, 'psp-9001')
+  assert.equal(parseWebhookEvent(withKey('null')).data.pspReference, null)
+  const absent = parseWebhookEvent(SAVED_CARD_EVENT)
+  assert.equal(absent.type, 'payment.succeeded')
+  assert.equal(absent.data.pspReference, undefined)
+})
+
 test('a payment event carries the stored card, the same shape as on the status read', () => {
   const event = parseWebhookEvent(SAVED_CARD_EVENT)
   assert.equal(event.type, 'payment.succeeded')
