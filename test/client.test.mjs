@@ -185,6 +185,20 @@ test('a ping against bad credentials is an AuthenticationError carrying the code
   )
 })
 
+test('getStatus passes pspReference through, whether set, null or absent', async () => {
+  const base = { transactionId: CHECKOUT.transactionId, status: 'succeeded', amount: 2500, currency: 'EUR' }
+  for (const [label, body] of [
+    ['set', { ...base, pspReference: 'psp-9001' }],
+    ['null', { ...base, pspReference: null }],
+    ['absent', base],
+  ]) {
+    const { fetchImpl } = recordingFetch({ body })
+    const result = await makeClient(fetchImpl).getStatus(CHECKOUT.transactionId)
+    assert.deepEqual(result, body, label)
+    assert.equal(result.pspReference, body.pspReference, label)
+  }
+})
+
 test('getStatus rejects anything that is not the returned transaction UUID', async () => {
   const { fetchImpl, calls } = recordingFetch({ body: {} })
   await assert.rejects(() => makeClient(fetchImpl).getStatus('order-1042'), TypeError)
