@@ -14,6 +14,7 @@ import {
   STOREFRONT_ERROR_CODES,
   StorefrontError,
   TransportError,
+  WALLET_TYPES,
   signRequest,
 } from '../dist/esm/index.js'
 import { CHARGE_VECTOR, PAYMENT_METHOD_ID, REVOKE_VECTOR, VECTOR } from './vector.mjs'
@@ -828,9 +829,21 @@ test('getStatus passes the stored payment method through and leaves paymentMetho
   const status = await makeClient(fetchImpl).getStatus(CHECKOUT.transactionId)
   // retiredReason is absent on the wire for a card the platform has not retired: read as null.
   assert.deepEqual(status.storedPaymentMethod, { ...storedPaymentMethod, retiredReason: null })
-  // The gateway's own paymentMethod is a category string, not the card; it is not typed
-  // by this SDK but it must not be mistaken for, or clobbered by, the card on file.
+  // The gateway's own paymentMethod is a category string, not the card; it must not be
+  // mistaken for, or clobbered by, the card on file.
   assert.equal(status.paymentMethod, 'card')
+})
+
+test('getStatus passes a wallet this SDK does not know yet through as a valid walletType', async () => {
+  const data = {
+    transactionId: CHECKOUT.transactionId, status: 'succeeded', amount: 2500, currency: 'EUR',
+    paymentMethod: 'wallet', walletType: 'paypal_wallet',
+  }
+  const { fetchImpl } = recordingFetch({ body: { success: true, data } })
+
+  const status = await makeClient(fetchImpl).getStatus(CHECKOUT.transactionId)
+  assert.deepEqual(status, data)
+  assert.equal(WALLET_TYPES.includes(status.walletType), false)
 })
 
 test('getStatus normalises an unreported brand and expiry to null, and adds no key when there is no card', async () => {
