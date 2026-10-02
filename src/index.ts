@@ -39,10 +39,12 @@ export {
   CHARGE_STATUSES,
   CHECKOUT_INTEGRATIONS,
   DECLINE_CLASSES,
+  PAYMENT_METHOD_CATEGORIES,
   REFUND_STATUSES,
   STORED_PAYMENT_METHOD_RETIRED_REASONS,
   STORED_PAYMENT_METHOD_STATUSES,
   TRANSACTION_STATUSES,
+  WALLET_TYPES,
 } from './types.js'
 export type {
   AgreementWebhookData,
@@ -60,6 +62,7 @@ export type {
   DeclineClass,
   DominaiteClientOptions,
   DominaiteWebhookEvent,
+  PaymentMethodCategory,
   PaymentMethodCharge,
   PaymentWebhookData,
   PaymentWebhookEvent,
@@ -71,5 +74,6 @@ export type {
   StoredPaymentMethodRetiredReason,
   StoredPaymentMethodStatus,
   TransactionStatus,
+  WalletType,
   WebhookEvent,
 } from './types.js'
