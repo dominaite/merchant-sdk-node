@@ -36,7 +36,7 @@ const PAYMENT_METHODS_PATH = '/merchant-api/payment-methods'
 const PAYMENTS_PATH = '/merchant-api/payments'
 const PING_PATH = '/merchant-api/ping'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
-const SDK_VERSION = '0.3.1'
+const SDK_VERSION = '0.4.0'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /**
  * A payment method id is opaque (pm_...), so this only pins what keeps it a single path
