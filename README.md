@@ -591,6 +591,10 @@ The body is flat JSON, with no `success` wrapper to branch on:
   "createdAt": "2026-08-20T14:00:00Z",
   "data": {
     "transactionId": "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+    "orderReference": "order-123",
+    "orderId": "dom_9a8b7c6d5e4f",
+    "pspReference": "psp_8f3a21c4",
+    "description": "Pro plan",
     "status": "succeeded",
     "previousStatus": "pending",
     "kind": "sale",
@@ -598,14 +602,43 @@ The body is flat JSON, with no `success` wrapper to branch on:
     "grossAmount": 8701,
     "surchargeAmount": 261,
     "currency": "EUR",
+    "paymentMethod": "card",
+    "walletType": null,
+    "paymentMethodBrand": "visa",
+    "paymentMethodLast4": "4242",
     "originalTransactionId": null,
-    "idempotencyKey": "order-123"
+    "idempotencyKey": "order-123",
+    "storedPaymentMethod": null
   }
 }
 ```
 
 Amounts are minor units. On `payment.*` the `amount` is what you are paid and `grossAmount` is the
 card movement; on `payment.refunded` the `amount` is what went back to the customer.
+
+Every `payment.*` event carries the same identification fields, typed on `PaymentWebhookData`:
+
+- `transactionId`: our transaction id, the same one create session and `getStatus()` return.
+- `orderReference`: your own order reference, the field to match events to your orders on. Null
+  when the payment did not start through the API or the session had none; refund and cancel
+  events carry the original payment's.
+- `orderId`: the hosted checkout order id, as on `getStatus()`. Null for refunds, cancellations
+  and payments taken outside hosted checkout.
+- `pspReference`: the payment processor's reference, as on `getStatus()`. Null until the
+  processor reports it, so read `getStatus()` later if a `payment.succeeded` arrives without it.
+  Refund and cancel events carry the original payment's.
+- `description`: what you sent on create session. Null when none was given and on refund and
+  cancellation events.
+- `paymentMethodBrand` and `paymentMethodLast4`: the lower-cased card brand and last four digits
+  once a card payment was attempted. Null while the payment is open, for non-card methods, and
+  when the provider did not report them.
+- `idempotencyKey`: the `Idempotency-Key` you sent on create session. Null on refund and dispute
+  events.
+- `originalTransactionId`: the earlier transaction this one hangs off. On `payment.refunded` it is
+  the refunded payment, and on the `payment.succeeded` of a captured authorization it is the
+  authorization. Null otherwise.
+
+Ignore keys you do not know: more may be added without a new `apiVersion`.
 
 `payment.*` data also carries `storedPaymentMethod`: the card a `saveCard` payment stored, the
 same object as `storedPaymentMethod` on `getStatus()` (`id`, `brand`, `last4`, `expiryMonth`,
