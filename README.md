@@ -745,6 +745,12 @@ const status = await client.getStatus(session.transactionId)
 is still payable the response also carries `expiresAt`; after that instant a `pending` session can
 only become `abandoned`. An unknown transaction id throws an `ApiError` with `httpStatus` 404.
 
+`paymentMethod` (`card`, `wallet`, `bank_transfer`, `sepa`) and `walletType` (`apple_pay`,
+`google_pay`, `samsung_pay`) say how the payer paid; both are null while the payment is open, and
+`walletType` is null for non-wallet payments. They are reporting data, not a money-flow switch: a
+wallet payment refunds, captures and disputes like a card. A `walletType` outside `WALLET_TYPES`
+is a wallet added after this SDK version, so treat it as valid.
+
 `succeeded` is the only value that means the payment is complete. Keep polling on `pending`,
 `processing` and `requires_capture` - none of them is terminal.
 

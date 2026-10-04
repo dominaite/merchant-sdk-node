@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Wallet reporting: `paymentMethod` and `walletType` (both optional, nullable strings) on
+  `CheckoutStatus`. `paymentMethod` is how the payer paid (`card`, `wallet`, `bank_transfer`,
+  `sepa`), null while the payment is still open and on older transactions. `walletType` names the
+  wallet when `paymentMethod` is `wallet` and is null otherwise; an unknown value is a valid wallet,
+  not an error. Reporting data only: a wallet payment refunds, captures and disputes like a card.
+  `PAYMENT_METHOD_CATEGORIES`, `WALLET_TYPES`, `PaymentMethodCategory` and `WalletType` are
+  exported.
+- Contract fixture: `paymentMethod` and `walletType` in the status read fields and examples. Wire
+  contract fixture and the drift check: the `wallets` section.
+
 ## 0.4.0
 
 ### Added

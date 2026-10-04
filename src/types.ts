@@ -109,6 +109,26 @@ export const TRANSACTION_STATUSES = [
 
 export type TransactionStatus = (typeof TRANSACTION_STATUSES)[number]
 
+/**
+ * Every payment method category the merchant API reports in paymentMethod, in the
+ * gateway's own order.
+ *
+ * Reporting data, not a money-flow switch: a wallet payment refunds, captures and
+ * disputes exactly like a plain card payment.
+ */
+export const PAYMENT_METHOD_CATEGORIES = ['card', 'wallet', 'bank_transfer', 'sepa'] as const
+
+export type PaymentMethodCategory = (typeof PAYMENT_METHOD_CATEGORIES)[number]
+
+/**
+ * The wallets the gateway currently names in walletType, pinned against the contract's
+ * wallets.walletTypes. The field can carry a lower-cased identifier not in this list yet:
+ * treat an unknown value as a valid wallet, not an error.
+ */
+export const WALLET_TYPES = ['apple_pay', 'google_pay', 'samsung_pay'] as const
+
+export type WalletType = (typeof WALLET_TYPES)[number]
+
 /** What {@link DominaiteClient.getStatus} returns. */
 export interface CheckoutStatus {
   transactionId: string
@@ -130,8 +150,8 @@ export interface CheckoutStatus {
    * and for declined or abandoned ones. Store storedPaymentMethod.id against your
    * customer - it is what {@link DominaiteClient.chargePaymentMethod} takes.
    *
-   * Not to be confused with the gateway's paymentMethod field, which is the string
-   * category of how the payer paid ('card', 'wallet', ...) and passes through untyped.
+   * Not to be confused with paymentMethod below, which is the category of how the payer
+   * paid ('card', 'wallet', ...).
    */
   storedPaymentMethod?: StoredPaymentMethod | null
   /**
@@ -140,6 +160,18 @@ export interface CheckoutStatus {
    * the original sale's reference. Absent on a gateway that predates it.
    */
   pspReference?: string | null
+  /**
+   * How the payer paid: one of {@link PAYMENT_METHOD_CATEGORIES}. null while the payment is
+   * still open (no method chosen yet) and on older transactions. Reporting data only: a
+   * wallet payment refunds, captures and disputes like a card.
+   */
+  paymentMethod?: PaymentMethodCategory | (string & {}) | null
+  /**
+   * Which wallet, when paymentMethod is 'wallet'. A value outside {@link WALLET_TYPES} is a
+   * wallet the gateway added after this SDK released: treat it as a valid wallet, not an
+   * error. null for non-wallet payments. Do not branch payment handling on it.
+   */
+  walletType?: WalletType | (string & {}) | null
   [key: string]: unknown
 }
 

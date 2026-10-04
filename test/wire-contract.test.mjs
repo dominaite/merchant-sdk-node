@@ -8,6 +8,7 @@ import {
   STOREFRONT_ERROR_CODES,
   TRANSACTION_STATUSES,
   VALIDATION_ERROR_CODES,
+  WALLET_TYPES,
 } from '../dist/esm/index.js'
 
 // merchant-api-wire-contract.json is the machine-relevant projection of the gateway's
@@ -17,6 +18,11 @@ import {
 
 const WIRE = JSON.parse(
   readFileSync(fileURLToPath(new URL('./merchant-api-wire-contract.json', import.meta.url)), 'utf8'),
+)
+
+const DECLARATIONS = readFileSync(
+  fileURLToPath(new URL('../dist/types/types.d.ts', import.meta.url)),
+  'utf8',
 )
 
 const sorted = (list) => [...list].sort()
@@ -51,6 +57,25 @@ test('the storefront codes are exactly the gateway storefront group, in order, n
       ['STOREFRONT_NOT_WHITELISTED', 409, false],
     ],
   )
+})
+
+test('the wallet types are exactly the gateway contract, in order', () => {
+  assert.deepEqual([...WALLET_TYPES], WIRE.wallets.walletTypes)
+})
+
+test('the status response carries every wallet reporting field, optional and nullable', () => {
+  const start = DECLARATIONS.indexOf('export interface CheckoutStatus {')
+  const body = DECLARATIONS.slice(start, DECLARATIONS.indexOf('\n}', start))
+  assert.deepEqual(
+    WIRE.wallets.reportingFields.map(({ path, type, required }) => [path, type, required]),
+    [
+      ['paymentMethod', 'string', false],
+      ['walletType', 'string', false],
+    ],
+  )
+  for (const { path } of WIRE.wallets.reportingFields) {
+    assert.match(body, new RegExp(`^ {4}${path}\\?: .*\\| null;$`, 'm'), `CheckoutStatus.${path}`)
+  }
 })
 
 test('the contract still lists this SDK', () => {
