@@ -50,8 +50,8 @@ Each key holds one or more scopes. A route answers only a key that holds its sco
 
 A key holds `payments` alone, or one or both of the other two scopes. A key with
 `transactions:read` or `webhooks:manage` is a reporting key, and it is not bound to one storefront.
-A key issued without scopes holds `payments`. The scopes of a key are fixed when it is issued: to change them, issue a new key.
-Every key can call `ping()` and `getIntegrationContract()`.
+A key issued without scopes holds `payments`. The scopes of a key are fixed when it is issued: to
+change them, issue a new key. Every key can call `ping()` and `getIntegrationContract()`.
 
 A call with a key that does not hold the scope throws `AuthenticationError` with `errorCode`
 `INSUFFICIENT_SCOPE` and `httpStatus` 403. Nothing was created. Use a key that holds the scope.
