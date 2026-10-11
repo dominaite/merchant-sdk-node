@@ -74,6 +74,7 @@ export type {
   PaymentWebhookEvent,
   Ping,
   Refund,
+  RefundList,
   RefundStatus,
   RetryOptions,
   StoredPaymentMethod,

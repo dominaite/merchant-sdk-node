@@ -483,6 +483,24 @@ export interface Refund {
   [key: string]: unknown
 }
 
+/** What {@link DominaiteClient.listRefunds} returns: one payment's refunds and its totals. */
+export interface RefundList {
+  /** The payment whose refunds these are. */
+  transactionId: string
+  /** ISO 4217 code of the payment and of every amount here. */
+  currency: string
+  /** MINOR units refunded so far, from every source: this API, the dashboard and the provider. */
+  refundedAmount: number
+  /** MINOR units a new refund could take right now. 0 when the payment cannot be refunded. */
+  refundableAmount: number
+  /**
+   * The refunds created through this API, newest first, each in the shape getRefund()
+   * returns. Refunds made in the dashboard count in the totals but are not listed.
+   */
+  refunds: Refund[]
+  [key: string]: unknown
+}
+
 /** What {@link DominaiteClient.ping} returns: proof your key, signing and clock are good. */
 export interface Ping {
   /** Always true on a 200. */

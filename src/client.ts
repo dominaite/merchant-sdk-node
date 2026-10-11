@@ -26,6 +26,7 @@ import type {
   PaymentMethodCharge,
   Ping,
   Refund,
+  RefundList,
   RetryOptions,
   StoredPaymentMethod,
 } from './types.js'
@@ -421,6 +422,33 @@ export class DominaiteClient {
     return readRefund(reply)
   }
 
+  /**
+   * Lists the refunds of one of your payments that were created through this API, newest
+   * first, with the payment's totals: refundedAmount counts every refund of the payment,
+   * the dashboard's included, and refundableAmount is what a new refund could take right
+   * now. A payment without refunds resolves with an empty list.
+   *
+   * Throws RefundError PAYMENT_NOT_FOUND (404) for a payment that is not yours. Otherwise
+   * AuthenticationError, RateLimitError, ApiError or TransportError.
+   */
+  async listRefunds(transactionId: string): Promise<RefundList> {
+    const id = normalizeTransactionId(transactionId)
+    // GET signs an EMPTY idempotency key and an EMPTY body.
+    const reply = await this.#send('GET', `${PAYMENTS_PATH}/${id}/refunds`, null, '')
+    const data = reply.envelope['data']
+    if (reply.status < 300 && isPlainObject(data) && Array.isArray(data['refunds'])) {
+      return {
+        ...data,
+        transactionId: stringOr(data['transactionId'], ''),
+        currency: stringOr(data['currency'], ''),
+        refundedAmount: typeof data['refundedAmount'] === 'number' ? data['refundedAmount'] : 0,
+        refundableAmount: typeof data['refundableAmount'] === 'number' ? data['refundableAmount'] : 0,
+        refunds: data['refunds'].filter(isPlainObject).map(toRefund),
+      }
+    }
+    throw refundFailure(reply, 'The API answered the refund list without a list body')
+  }
+
   #prepareSessionRequest(params: CreateCheckoutSessionParams): { idempotencyKey: string; body: string } {
     validateMoneyParams(params, params?.verifyOnly === true)
     const { idempotencyKey: providedKey, ...bodyParams } = params
@@ -654,9 +682,14 @@ function readRefund(reply: Reply): Refund {
     return toRefund(data)
   }
 
+  throw refundFailure(reply, 'The API answered the refund without a refund body')
+}
+
+/** The error for a refund route reply that carried no refund: a RefundError for the refund codes. */
+function refundFailure(reply: Reply, noBodyMessage: string): DominaiteError {
   const errorCode = stringOr(reply.error['code'], '')
   if (reply.status >= 400 && reply.status < 500 && isRefundErrorCode(errorCode)) {
-    throw new RefundError(
+    return new RefundError(
       reply.status,
       errorCode,
       stringOr(reply.error['message'], 'The refund was refused.'),
@@ -664,9 +697,9 @@ function readRefund(reply: Reply): Refund {
     )
   }
   if (reply.status >= 400) {
-    throw rejection(reply)
+    return rejection(reply)
   }
-  throw new ApiError(reply.status, 'The API answered the refund without a refund body')
+  return new ApiError(reply.status, noBodyMessage, undefined, reply.envelope)
 }
 
 function isRefundErrorCode(code: string): code is RefundErrorCode {
