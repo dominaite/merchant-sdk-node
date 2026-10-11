@@ -501,6 +501,194 @@ export interface RefundList {
   [key: string]: unknown
 }
 
+/** The units a plan's billing interval is counted in, in the gateway's own order. */
+export const INTERVAL_UNITS = ['day', 'week', 'month', 'year'] as const
+
+export type IntervalUnit = (typeof INTERVAL_UNITS)[number]
+
+/**
+ * Every status a plan can have, in the gateway's own order. Only an active plan accepts new
+ * agreements; an archived plan keeps billing the agreements it already has.
+ */
+export const PLAN_STATUSES = ['active', 'archived'] as const
+
+export type PlanStatus = (typeof PLAN_STATUSES)[number]
+
+/** Parameters for {@link DominaiteClient.createPlan}. */
+export interface CreatePlanParams {
+  /** Display name, 1 to 100 characters. You can change it later with updatePlan(). */
+  name: string
+  /** The charge per period in MINOR units of currency: 2500 is 25.00 EUR. You cannot change it later. */
+  amount: number
+  /** ISO 4217 code, three upper-case letters. You cannot change it later. */
+  currency: string
+  /** day, week, month or year. You cannot change it later. */
+  intervalUnit: IntervalUnit | (string & {})
+  /**
+   * Units per billing period, 1 when left out: month with 3 bills every 3 months. The
+   * interval is at most one year.
+   */
+  intervalCount?: number
+  /** The number of periods after which each agreement completes. Leave it out to bill until cancelled. */
+  periodCount?: number
+  /** Days from activation to the first charge, 0 to 365. Leave it out or send 0 for no trial. */
+  trialDays?: number
+  /**
+   * Your page where the customer cancels: an absolute https URL of at most 2048 characters.
+   * The platform prints it on every receipt and decline notice it emails the customer.
+   */
+  cancelUrl?: string
+  /**
+   * Required. Derive it from YOUR plan, never per attempt: the same key with the same body
+   * answers the same plan, so a create whose answer you lost is safe to repeat.
+   */
+  idempotencyKey: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
+}
+
+/** Parameters for {@link DominaiteClient.updatePlan}. Send at least one field; a field you leave out stays as it is. */
+export interface UpdatePlanParams {
+  /** The new display name, 1 to 100 characters. */
+  name?: string
+  /** The new trial, 0 to 365 days (0 removes it). Only agreements created after the change get it. */
+  trialDays?: number
+  /** The new cancel page (absolute https URL). An empty string removes it. */
+  cancelUrl?: string
+  /** Optional: the API does not replay a plan update, so the SDK sends a key only when you give one. */
+  idempotencyKey?: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
+}
+
+/** A recurring price you sell, as the plan routes return it. */
+export interface Plan {
+  /** plan_ followed by 32 hex characters. Case-sensitive: store and send it exactly as returned. */
+  id: string
+  name: string
+  /** The charge per period in MINOR units of currency. */
+  amount: number
+  currency: string
+  intervalUnit: IntervalUnit | (string & {})
+  intervalCount: number
+  /** The fixed number of periods; null bills until cancelled. */
+  periodCount: number | null
+  trialDays: number
+  /** active or archived. Treat a value you do not recognise as not accepting agreements. */
+  status: PlanStatus | (string & {})
+  /** Your cancel page; null when you gave none. */
+  cancelUrl: string | null
+  /** ISO 8601 UTC. */
+  createdAt: string
+  /** ISO 8601 UTC; null while active. */
+  archivedAt: string | null
+  [key: string]: unknown
+}
+
+/** Parameters for {@link DominaiteClient.createAgreement}. */
+export interface CreateAgreementParams {
+  /** The plan_ id of one of your active plans. */
+  planId: string
+  /** Your own id for the customer, 1 to 100 characters, the same for every agreement of that customer. */
+  customerReference: string
+  /**
+   * The pm_ id of an active card this customer already saved, saved from a payment in the
+   * plan's currency. Leave it out to let the subscription session save a card. Needs consent.
+   */
+  storedPaymentMethodId?: string
+  /**
+   * The customer's acceptance, when you captured it on your own page. textVersion is your
+   * own label here. Required with storedPaymentMethodId and with maxAmountPerPeriod.
+   */
+  consent?: AgreementConsent
+  /**
+   * For a variable amount only (seat plus usage): the most one charge may be, in MINOR
+   * units, at least the plan's amount. Needs consent. Leave it out for a fixed agreement.
+   */
+  maxAmountPerPeriod?: number
+  /**
+   * Required. Derive it from YOUR subscription, never per attempt: the same key with the
+   * same body answers the same agreement.
+   */
+  idempotencyKey: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
+}
+
+/**
+ * Why an agreement is past_due, in the gateway's own order. card_expired and card_revoked:
+ * the customer can fix it with a new card. hard_decline and dunning_exhausted: the issuer
+ * declined. sca_required: the issuer wants the customer present. unprocessable: the charge
+ * could not be placed at all. Treat a value you do not recognise as needing a new card.
+ */
+export const PAST_DUE_REASONS = [
+  'card_expired',
+  'card_revoked',
+  'hard_decline',
+  'dunning_exhausted',
+  'sca_required',
+  'unprocessable',
+] as const
+
+export type PastDueReason = (typeof PAST_DUE_REASONS)[number]
+
+/** The consent recorded on an agreement: what was sent, plus the platform's own receipt. */
+export interface AgreementConsentRecord {
+  /** As it was sent, on createAgreement or on the subscription session. */
+  textVersion: string
+  /** ISO 8601 UTC, as it was sent. */
+  acceptedAt: string | null
+  /** The customer's address, as it was sent. */
+  ip: string
+  /** ISO 8601 UTC, when the consent reached the platform (server clock). */
+  receivedAt: string | null
+  /** The address of the server that sent the consent, not the customer's. Often null. */
+  receivedFromIp: string | null
+  [key: string]: unknown
+}
+
+/** A customer's subscription to a plan, as the agreement routes return it. */
+export interface Agreement {
+  /** agr_ followed by 32 hex characters. Case-sensitive: store and send it exactly as returned. */
+  id: string
+  /** The plan the agreement was created from. */
+  planId: string
+  customerReference: string
+  /** The pm_ id of the card on file; null until a card is saved. */
+  storedPaymentMethodId: string | null
+  /** Treat a value you do not recognise as not billing. */
+  status: AgreementStatus | (string & {})
+  /** The charge per period in MINOR units, copied from the plan when the agreement was created. */
+  amount: number
+  /** The most one charge may be on a variable agreement; null on a fixed one. */
+  maxAmountPerPeriod: number | null
+  currency: string
+  intervalUnit: IntervalUnit | (string & {})
+  intervalCount: number
+  /** null bills until cancelled. */
+  periodCount: number | null
+  trialDays: number
+  /** ISO 8601 UTC of the next charge; null while pending and once ended. */
+  nextChargeAt: string | null
+  /** Why the agreement is past_due; null in every other status. */
+  pastDueReason: PastDueReason | (string & {}) | null
+  /** ISO 8601 UTC, when it went past_due; null in every other status. */
+  pastDueAt: string | null
+  /** The recorded consent; null until captured. */
+  consent: AgreementConsentRecord | null
+  /** Starts at 1 and rises when the price changes for a future period. */
+  version: number
+  /** The agreement's change counter: equal to data.sequence of its latest agreement.* event, 0 before the first. */
+  sequence: number
+  /** ISO 8601 UTC. */
+  createdAt: string
+  /** ISO 8601 UTC; null while pending. */
+  activatedAt: string | null
+  /** ISO 8601 UTC; null unless cancelled. */
+  cancelledAt: string | null
+  [key: string]: unknown
+}
+
 /** What {@link DominaiteClient.ping} returns: proof your key, signing and clock are good. */
 export interface Ping {
   /** Always true on a 200. */

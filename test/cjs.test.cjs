@@ -28,6 +28,11 @@ test('the CommonJS build exports the same surface', () => {
   }
 })
 
+test('the CommonJS build exports every name the ESM build exports', async () => {
+  const esm = await import('../dist/esm/index.js')
+  assert.deepEqual(Object.keys(sdk).filter((name) => name !== '__esModule').sort(), Object.keys(esm).sort())
+})
+
 test('the CommonJS build reproduces the known-answer vector', () => {
   const signature = sdk.signRequest({
     secret: 'dms_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',

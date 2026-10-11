@@ -25,10 +25,15 @@ import type {
   DominaiteClientOptions,
   PaymentMethodCharge,
   Ping,
+  Agreement,
+  CreateAgreementParams,
+  CreatePlanParams,
+  Plan,
   Refund,
   RefundList,
   RetryOptions,
   StoredPaymentMethod,
+  UpdatePlanParams,
 } from './types.js'
 
 const DEFAULT_BASE_URL = 'https://api.dominaite.com/payments'
@@ -36,6 +41,8 @@ const SESSIONS_PATH = '/merchant-api/checkout/sessions'
 const PAYMENT_METHODS_PATH = '/merchant-api/payment-methods'
 const PAYMENTS_PATH = '/merchant-api/payments'
 const PING_PATH = '/merchant-api/ping'
+const PLANS_PATH = '/merchant-api/plans'
+const AGREEMENTS_PATH = '/merchant-api/agreements'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
 const SDK_VERSION = '0.4.0'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -48,6 +55,8 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const PAYMENT_METHOD_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/
 /** A refund id (re_...) is opaque too, and goes into the signed path the same way. */
 const REFUND_ID_PATTERN = PAYMENT_METHOD_ID_PATTERN
+/** Plan (plan_...) and agreement (agr_...) ids are case-sensitive handles, signed verbatim too. */
+const HANDLE_PATTERN = PAYMENT_METHOD_ID_PATTERN
 /** Hard ceiling on a response body. Past this the read is abandoned, not buffered. */
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 /** Hosts allowed to be reached over plain http, for local development only. */
@@ -449,6 +458,139 @@ export class DominaiteClient {
     throw refundFailure(reply, 'The API answered the refund list without a list body')
   }
 
+  /**
+   * Creates a plan: a recurring price you sell. Answers the new plan. The same
+   * idempotencyKey with the same body answers the same plan again, so a create whose answer
+   * you lost is safe to repeat. Amount, currency and interval never change: for a new
+   * price, create a new plan and archive the old one with deletePlan().
+   *
+   * Throws ApiError: a validation code on a 400, or IDEMPOTENCY_KEY_REUSED (422) when the
+   * key was first used with another body. Otherwise AuthenticationError, RateLimitError or
+   * TransportError (network or 5xx: retry with the same key).
+   */
+  async createPlan(params: CreatePlanParams): Promise<Plan> {
+    const { idempotencyKey, body } = prepareKeyedBody(params)
+    const reply = await this.#send('POST', PLANS_PATH, body, idempotencyKey)
+    return toPlan(readObject(reply, 'plan'))
+  }
+
+  /**
+   * Lists your plans: at most 200, active plans first, newest first within a status. The
+   * route has no pages; read a plan with getPlan() when you have more.
+   *
+   * Throws AuthenticationError, RateLimitError, ApiError or TransportError.
+   */
+  async listPlans(): Promise<Plan[]> {
+    // GET signs an EMPTY idempotency key and an EMPTY body.
+    const reply = await this.#send('GET', PLANS_PATH, null, '')
+    return readArray(reply, 'plan list').map(toPlan)
+  }
+
+  /**
+   * Reads one of your plans. planId is the plan_ id exactly as createPlan() returned it:
+   * it is case-sensitive.
+   *
+   * Throws ApiError PLAN_NOT_FOUND (404) for a plan that is not yours. Otherwise
+   * AuthenticationError, RateLimitError, ApiError or TransportError.
+   */
+  async getPlan(planId: string): Promise<Plan> {
+    const id = normalizeHandle(planId, 'planId', 'the plan_ id returned by createPlan()')
+    const reply = await this.#send('GET', `${PLANS_PATH}/${id}`, null, '')
+    return toPlan(readObject(reply, 'plan'))
+  }
+
+  /**
+   * Changes the name, the trial or the cancel page of one of your plans (PATCH) and answers
+   * the plan as it is now. Send at least one of them. A trial change reaches only the
+   * agreements created after it. Amount, currency and interval never change.
+   *
+   * The Idempotency-Key is optional here: the API does not replay a plan update, and
+   * repeating the same update is harmless. The SDK sends and signs a key only when you
+   * give one.
+   *
+   * Throws ApiError: PLAN_NOT_FOUND (404), or a validation code on a 400. Otherwise
+   * AuthenticationError, RateLimitError or TransportError.
+   */
+  async updatePlan(planId: string, params: UpdatePlanParams): Promise<Plan> {
+    const id = normalizeHandle(planId, 'planId', 'the plan_ id returned by createPlan()')
+    if (!isPlainObject(params)) {
+      throw new TypeError('params must be an object with the fields to change')
+    }
+    const { idempotencyKey: providedKey, ...bodyParams } = params
+    // No key signs an EMPTY key and sends no Idempotency-Key header.
+    const idempotencyKey = providedKey === undefined || providedKey === null ? '' : normalizeIdempotencyKey(providedKey)
+    const reply = await this.#send('PATCH', `${PLANS_PATH}/${id}`, encodeBody(bodyParams), idempotencyKey)
+    return toPlan(readObject(reply, 'plan'))
+  }
+
+  /**
+   * Archives one of your plans: it takes no new agreements, and the agreements it already
+   * has keep billing. Resolves on HTTP 204. Archiving an archived plan resolves again, so a
+   * timed-out call is safe to repeat.
+   *
+   * Throws ApiError PLAN_NOT_FOUND (404) for a plan that is not yours. Otherwise
+   * AuthenticationError, RateLimitError, ApiError or TransportError.
+   */
+  async deletePlan(planId: string): Promise<void> {
+    const id = normalizeHandle(planId, 'planId', 'the plan_ id returned by createPlan()')
+    // DELETE signs an EMPTY idempotency key and an EMPTY body, like GET.
+    const reply = await this.#send('DELETE', `${PLANS_PATH}/${id}`, null, '')
+    if (reply.status >= 400) {
+      throw rejection(reply)
+    }
+  }
+
+  /**
+   * Subscribes one of your customers to a plan. The agreement starts pending and charges
+   * nothing: the subscription session (createCheckoutSession() with agreementId) takes the
+   * first payment, saves the card and activates it. Then the platform charges each period.
+   * The same idempotencyKey with the same body answers the same agreement again.
+   *
+   * Throws ApiError: PLAN_NOT_FOUND or PAYMENT_METHOD_NOT_FOUND (404); PLAN_NOT_ACTIVE or
+   * PAYMENT_METHOD_NOT_ACTIVE (409); AGREEMENT_CONSENT_REQUIRED, MAX_AMOUNT_BELOW_PLAN_AMOUNT,
+   * PAYMENT_METHOD_CURRENCY_MISMATCH, PAYMENT_METHOD_CURRENCY_UNKNOWN or
+   * IDEMPOTENCY_KEY_REUSED (422); a validation code on a 400. Nothing is created on any of
+   * them. Otherwise AuthenticationError, RateLimitError or TransportError (network or 5xx:
+   * retry with the same key).
+   */
+  async createAgreement(params: CreateAgreementParams): Promise<Agreement> {
+    const { idempotencyKey, body } = prepareKeyedBody(params)
+    const reply = await this.#send('POST', AGREEMENTS_PATH, body, idempotencyKey)
+    return toAgreement(readObject(reply, 'agreement'))
+  }
+
+  /**
+   * Reads one of your agreements: its status, the next charge date, why it is past_due,
+   * and its own copy of the price. agreementId is the agr_ id exactly as createAgreement()
+   * returned it: it is case-sensitive.
+   *
+   * Throws ApiError AGREEMENT_NOT_FOUND (404) for an agreement that is not yours. Otherwise
+   * AuthenticationError, RateLimitError, ApiError or TransportError.
+   */
+  async getAgreement(agreementId: string): Promise<Agreement> {
+    const id = normalizeHandle(agreementId, 'agreementId', 'the agr_ id returned by createAgreement()')
+    const reply = await this.#send('GET', `${AGREEMENTS_PATH}/${id}`, null, '')
+    return toAgreement(readObject(reply, 'agreement'))
+  }
+
+  /**
+   * Cancels one of your agreements: pending, active or past_due. No further charge is
+   * scheduled; a charge already placed is not reversed. Resolves on HTTP 204. Cancelling a
+   * cancelled agreement resolves again, so a timed-out call is safe to repeat.
+   *
+   * Throws ApiError: AGREEMENT_NOT_FOUND (404), or AGREEMENT_ENDED (409) when the agreement
+   * already completed or failed. Otherwise AuthenticationError, RateLimitError or
+   * TransportError.
+   */
+  async cancelAgreement(agreementId: string): Promise<void> {
+    const id = normalizeHandle(agreementId, 'agreementId', 'the agr_ id returned by createAgreement()')
+    // DELETE signs an EMPTY idempotency key and an EMPTY body, like GET.
+    const reply = await this.#send('DELETE', `${AGREEMENTS_PATH}/${id}`, null, '')
+    if (reply.status >= 400) {
+      throw rejection(reply)
+    }
+  }
+
   #prepareSessionRequest(params: CreateCheckoutSessionParams): { idempotencyKey: string; body: string } {
     validateMoneyParams(params, params?.verifyOnly === true)
     const { idempotencyKey: providedKey, ...bodyParams } = params
@@ -493,7 +635,7 @@ export class DominaiteClient {
 
   /** Sends and applies the generic failure rules: 5xx is transport, 4xx is ApiError. */
   async #request(
-    method: 'GET' | 'POST' | 'DELETE',
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     path: string,
     body: string | null,
     idempotencyKey: string,
@@ -512,7 +654,7 @@ export class DominaiteClient {
    * can read the code and the data the gateway attached before deciding what it is.
    */
   async #send(
-    method: 'GET' | 'POST' | 'DELETE',
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     path: string,
     body: string | null,
     idempotencyKey: string,
@@ -798,6 +940,102 @@ function validateMoneyParams(
   }
 }
 
+/** Splits idempotencyKey (required) off the params and encodes the rest as given. */
+function prepareKeyedBody(params: Record<string, unknown>): { idempotencyKey: string; body: string } {
+  if (!isPlainObject(params)) {
+    throw new TypeError('params must be an object')
+  }
+  const { idempotencyKey: providedKey, ...bodyParams } = params
+  return { idempotencyKey: normalizeIdempotencyKey(providedKey), body: encodeBody(bodyParams) }
+}
+
+/** envelope.data of a 2xx reply when it is an object; the rejection otherwise. */
+function readObject(reply: Reply, what: string): Record<string, unknown> {
+  const data = reply.envelope['data']
+  if (reply.status < 300 && isPlainObject(data)) {
+    return data
+  }
+  if (reply.status >= 400) {
+    throw rejection(reply)
+  }
+  throw new ApiError(reply.status, `The API answered without a ${what} body`, undefined, reply.envelope)
+}
+
+/** The objects in envelope.data of a 2xx reply when it is an array; the rejection otherwise. */
+function readArray(reply: Reply, what: string): Record<string, unknown>[] {
+  const data = reply.envelope['data']
+  if (reply.status < 300 && Array.isArray(data)) {
+    return data.filter(isPlainObject)
+  }
+  if (reply.status >= 400) {
+    throw rejection(reply)
+  }
+  throw new ApiError(reply.status, `The API answered without a ${what}`, undefined, reply.envelope)
+}
+
+function toPlan(data: Record<string, unknown>): Plan {
+  return {
+    ...data,
+    id: stringOr(data['id'], ''),
+    name: stringOr(data['name'], ''),
+    amount: numberOr(data['amount'], 0),
+    currency: stringOr(data['currency'], ''),
+    intervalUnit: stringOr(data['intervalUnit'], ''),
+    intervalCount: numberOr(data['intervalCount'], 1),
+    periodCount: numberOrNull(data['periodCount']),
+    trialDays: numberOr(data['trialDays'], 0),
+    status: stringOr(data['status'], ''),
+    cancelUrl: stringOrNull(data['cancelUrl']),
+    createdAt: stringOr(data['createdAt'], ''),
+    archivedAt: stringOrNull(data['archivedAt']),
+  }
+}
+
+function toAgreement(data: Record<string, unknown>): Agreement {
+  const consent = data['consent']
+  return {
+    ...data,
+    id: stringOr(data['id'], ''),
+    planId: stringOr(data['planId'], ''),
+    customerReference: stringOr(data['customerReference'], ''),
+    storedPaymentMethodId: stringOrNull(data['storedPaymentMethodId']),
+    status: stringOr(data['status'], ''),
+    amount: numberOr(data['amount'], 0),
+    maxAmountPerPeriod: numberOrNull(data['maxAmountPerPeriod']),
+    currency: stringOr(data['currency'], ''),
+    intervalUnit: stringOr(data['intervalUnit'], ''),
+    intervalCount: numberOr(data['intervalCount'], 1),
+    periodCount: numberOrNull(data['periodCount']),
+    trialDays: numberOr(data['trialDays'], 0),
+    nextChargeAt: stringOrNull(data['nextChargeAt']),
+    pastDueReason: stringOrNull(data['pastDueReason']),
+    pastDueAt: stringOrNull(data['pastDueAt']),
+    consent: isPlainObject(consent)
+      ? {
+          ...consent,
+          textVersion: stringOr(consent['textVersion'], ''),
+          acceptedAt: stringOrNull(consent['acceptedAt']),
+          ip: stringOr(consent['ip'], ''),
+          receivedAt: stringOrNull(consent['receivedAt']),
+          receivedFromIp: stringOrNull(consent['receivedFromIp']),
+        }
+      : null,
+    version: numberOr(data['version'], 1),
+    sequence: numberOr(data['sequence'], 0),
+    createdAt: stringOr(data['createdAt'], ''),
+    activatedAt: stringOrNull(data['activatedAt']),
+    cancelledAt: stringOrNull(data['cancelledAt']),
+  }
+}
+
+function normalizeHandle(value: unknown, name: string, hint: string): string {
+  const normalized = String(value ?? '').trim()
+  if (!HANDLE_PATTERN.test(normalized)) {
+    throw new TypeError(`${name} must be ${hint}`)
+  }
+  return normalized
+}
+
 function normalizePaymentMethodId(paymentMethodId: unknown): string {
   const normalized = String(paymentMethodId ?? '').trim()
   if (!PAYMENT_METHOD_ID_PATTERN.test(normalized)) {
@@ -940,6 +1178,18 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === 'string' && value !== '' ? value : fallback
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' ? value : fallback
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' ? value : null
 }
 
 function describe(error: unknown): string {
