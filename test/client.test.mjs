@@ -620,7 +620,7 @@ test('orderReference must be a non-empty string', async () => {
 
 test('a 429 is a RateLimitError carrying an integer Retry-After', async () => {
   const fetchImpl = async () =>
-    new Response(JSON.stringify({ success: false, errorCode: 'RATE_LIMITED' }), {
+    new Response(JSON.stringify({ success: false, error: { code: 'RATE_LIMIT_EXCEEDED', statusCode: 429 } }), {
       status: 429,
       headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
     })
@@ -632,6 +632,7 @@ test('a 429 is a RateLimitError carrying an integer Retry-After', async () => {
       assert.ok(!(error instanceof TransportError), '429 must not look retryable')
       assert.ok(!(error instanceof ApiError))
       assert.equal(error.retryAfterSeconds, 30)
+      assert.equal(error.errorCode, 'RATE_LIMIT_EXCEEDED')
       assert.match(error.message, /retryAfterSeconds/)
       return true
     },
@@ -1145,12 +1146,16 @@ test('ErrorCodes names each code as itself and cannot be changed at runtime', ()
   }
   assert.deepEqual(Object.keys(ErrorCodes).sort(), [
     'ALREADY_PROCESSED',
+    'CHARGE_DECLINE_RATE_EXCEEDED',
+    'CHARGE_VELOCITY_EXCEEDED',
     'DUPLICATE_REQUEST',
     'IDEMPOTENCY_KEY_REUSED',
+    'INSUFFICIENT_SCOPE',
     'PAYMENT_NOT_FOUND',
     'PAYMENT_NOT_REFUNDABLE',
     'PAYMENT_PROCESSING_UNAVAILABLE',
     'PRIOR_ATTEMPT_FAILED',
+    'RATE_LIMIT_EXCEEDED',
     'REFUND_AMOUNT_EXCEEDED',
     'REFUND_FAILED',
     'REFUND_NOT_FOUND',

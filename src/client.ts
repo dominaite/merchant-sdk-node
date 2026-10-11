@@ -573,27 +573,49 @@ export class DominaiteClient {
     const envelopeError = isPlainObject(envelope['error']) ? envelope['error'] : {}
 
     if (response.status === 401 || response.status === 403) {
+      const errorCode = stringOr(payload['errorCode'], stringOr(envelopeError['code'], 'UNAUTHORIZED'))
       throw new AuthenticationError(
-        stringOr(payload['errorCode'], stringOr(envelopeError['code'], 'UNAUTHORIZED')),
-        'Authentication failed - check your key id, secret, and server clock.',
+        errorCode,
+        accessDeniedMessage(response.status, errorCode, stringOr(envelopeError['message'], '')),
+        response.status,
       )
     }
     if (response.status === 429) {
       // Deliberately not a TransportError: the retry helper would hammer a limiter that
       // is already telling us to stop. The caller waits out retryAfterSeconds instead.
       const retryAfterSeconds = parseRetryAfterSeconds(response.headers?.get('Retry-After'))
+      const errorCode = stringOr(envelopeError['code'], stringOr(payload['errorCode'], ''))
       const wait =
         retryAfterSeconds === null
           ? 'Retry with the same idempotency key after backing off.'
           : `Wait ${retryAfterSeconds}s (retryAfterSeconds), then retry with the same idempotency key.`
       throw new RateLimitError(
-        `Rate limit exceeded (HTTP 429). ${wait}`,
+        `Rate limit exceeded (HTTP 429${errorCode === '' ? '' : ` ${errorCode}`}). ${wait}`,
         retryAfterSeconds,
+        errorCode === '' ? undefined : errorCode,
+        envelope,
       )
     }
 
     return { status: response.status, envelope, payload, error: envelopeError }
   }
+}
+
+/**
+ * The message of an AuthenticationError. The clock hint is for 401 only: a 403 means the
+ * key signed correctly, so the key id, secret and clock are fine, and the key may not call
+ * the route.
+ */
+function accessDeniedMessage(httpStatus: number, errorCode: string, apiMessage: string): string {
+  if (httpStatus === 401) {
+    return 'Authentication failed - check your key id, secret, and server clock.'
+  }
+  if (errorCode === 'INSUFFICIENT_SCOPE') {
+    // The API's own message names the scope the route needs.
+    const scope = apiMessage === '' ? 'This API key does not have the scope this route requires' : apiMessage
+    return `${scope.replace(/\.+$/, '')}. A key's scopes are fixed when it is issued: use a key that holds this scope.`
+  }
+  return `Access denied (HTTP 403 ${errorCode}): this API key may not call this route.`
 }
 
 /** The generic reading of a failed reply: 5xx is the API being unavailable, 4xx a rejection. */
