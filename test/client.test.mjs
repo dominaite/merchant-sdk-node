@@ -758,13 +758,15 @@ const CHARGE_PARAMS = {
 }
 
 // The wire form of a placed charge: success=true, the charge under data, and no
-// declineClass/declineCode keys at all (the gateway omits nulls).
+// declineClass/declineCode/agreementId keys at all (the gateway omits nulls). sequence is
+// an integer, so it is always there.
 const CHARGE = {
   chargeId: 'ch_33333333333343338333333333333333',
   status: 'succeeded',
   transactionId: '33333333-3333-4333-8333-333333333333',
+  sequence: 1,
 }
-const CHARGE_RESULT = { ...CHARGE, declineClass: null, declineCode: null }
+const CHARGE_RESULT = { ...CHARGE, declineClass: null, declineCode: null, agreementId: null }
 const placed = (charge = CHARGE) => ({ status: 201, body: { success: true, data: charge } })
 
 test('saveCard is sent in the session body and nowhere else', async () => {
@@ -915,6 +917,28 @@ test('chargePaymentMethod sends agreementId and any field it does not model, as 
   )
 })
 
+test('a charge under an agreement answers its agreementId and sequence', async () => {
+  const underAgreement = { ...CHARGE, agreementId: 'agr_0123456789abcdef0123456789abcdef', sequence: 4 }
+  const { fetchImpl } = recordingFetch(placed(underAgreement))
+
+  const charge = await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, {
+    ...CHARGE_PARAMS,
+    agreementId: underAgreement.agreementId,
+  })
+
+  assert.equal(charge.agreementId, underAgreement.agreementId)
+  assert.equal(charge.sequence, 4)
+})
+
+test('a charge from a gateway that sends no sequence reads it as 0', async () => {
+  const { sequence: _absent, ...older } = CHARGE
+  const { fetchImpl } = recordingFetch(placed(older))
+
+  const charge = await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS)
+  assert.equal(charge.sequence, 0)
+  assert.equal(charge.agreementId, null)
+})
+
 test('a 402 decline is a result with a decline class, not an exception', async () => {
   const declined = { ...CHARGE, status: 'failed', declineClass: 'soft_funds', declineCode: '51' }
   const { fetchImpl } = recordingFetch({
@@ -927,7 +951,7 @@ test('a 402 decline is a result with a decline class, not an exception', async (
   })
 
   const charge = await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS)
-  assert.deepEqual(charge, declined)
+  assert.deepEqual(charge, { ...declined, agreementId: null })
   assert.equal(charge.status, 'failed')
   assert.equal(charge.declineClass, 'soft_funds')
   assert.equal(charge.declineCode, '51')
@@ -941,7 +965,7 @@ test('a 200 durable replay of a placed charge is a result too', async () => {
 })
 
 test('a charge the gateway answers with a code is a ChargeError keeping code, status and data', async () => {
-  const unknown = { ...CHARGE, status: 'pending' }
+  const unknown = { ...CHARGE, status: 'pending', sequence: 0 }
   const { fetchImpl } = recordingFetch({
     status: 502,
     body: {
@@ -959,7 +983,7 @@ test('a charge the gateway answers with a code is a ChargeError keeping code, st
       assert.equal(error.httpStatus, 502)
       assert.equal(error.errorCode, 'CHARGE_OUTCOME_UNKNOWN')
       assert.equal(error.message, 'The payment provider gave no verdict.')
-      assert.deepEqual(error.charge, { ...unknown, declineClass: null, declineCode: null })
+      assert.deepEqual(error.charge, { ...unknown, declineClass: null, declineCode: null, agreementId: null })
       assert.equal(error.transactionId, CHARGE.transactionId)
       return true
     },

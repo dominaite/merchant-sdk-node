@@ -709,6 +709,8 @@ function toCharge(data: Record<string, unknown>): PaymentMethodCharge {
     declineClass: typeof data['declineClass'] === 'string' ? data['declineClass'] : null,
     declineCode: typeof data['declineCode'] === 'string' ? data['declineCode'] : null,
     transactionId: stringOr(data['transactionId'], ''),
+    agreementId: typeof data['agreementId'] === 'string' ? data['agreementId'] : null,
+    sequence: typeof data['sequence'] === 'number' ? data['sequence'] : 0,
   }
 }
 

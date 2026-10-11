@@ -631,7 +631,7 @@ test('the contract examples themselves carry exactly their declared fields', () 
     Object.keys(createCheckoutSession.refusalExample).sort(),
     [...createCheckoutSession.fields].sort(),
   )
-  // The widget example is in wire form: its null clientSecret is absent.
+  // The widget example leaves its null clientSecret off, as the wire does.
   assert.deepEqual(
     Object.keys(createCheckoutSession.successExample.checkout).sort(),
     createCheckoutSession.checkoutFields.filter((field) => field !== 'clientSecret').sort(),

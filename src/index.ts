@@ -38,6 +38,7 @@ export type { SignRequestInput } from './signing.js'
 export { isPaid, isTerminal } from './status.js'
 export { parseWebhookEvent, verifyWebhook } from './webhooks.js'
 export {
+  AGREEMENT_STATUSES,
   CHARGE_STATUSES,
   CHECKOUT_INTEGRATIONS,
   DECLINE_CLASSES,
@@ -50,6 +51,7 @@ export {
 } from './types.js'
 export type {
   AgreementConsent,
+  AgreementStatus,
   AgreementWebhookData,
   AgreementWebhookEvent,
   ChargePaymentMethodParams,
@@ -60,6 +62,7 @@ export type {
   CheckoutIntegration,
   CheckoutSession,
   CheckoutStatus,
+  CheckoutStatusAgreement,
   CreateCheckoutSessionParams,
   CreateRefundParams,
   DeclineClass,

@@ -127,6 +127,13 @@ export interface CheckoutSession {
    * 'widget'.
    */
   clientSecret?: string | null
+  /**
+   * True on a verify-only session: amount is then the platform's verification hold, released
+   * once the card is saved. Absent (null) on a payment session.
+   */
+  verifyOnly?: boolean | null
+  /** The agr_ handle of the agreement this session takes the first payment for. Absent (null) on a one-off checkout. */
+  agreementId?: string | null
   [key: string]: unknown
 }
 
@@ -224,8 +231,63 @@ export interface CheckoutStatus {
    * error. null for non-wallet payments. Do not branch payment handling on it.
    */
   walletType?: WalletType | (string & {}) | null
+  /**
+   * True on a verify-only session: a card check, not a payment. status stays the raw status
+   * (requires_capture, then cancelled once the hold is released); a non-null
+   * storedPaymentMethod is what says the card is verified. Absent (null) on every other
+   * session.
+   */
+  verifyOnly?: boolean | null
+  /**
+   * What to do with a failed payment: one of {@link DECLINE_CLASSES}, or a class the
+   * gateway added after this SDK released. Null while the payment is open, on every status
+   * other than failed, and on a failure that arrived without a classification. Never read
+   * null as hard; if you retry, retry as you would for soft_other.
+   */
+  declineClass?: DeclineClass | (string & {}) | null
+  /**
+   * True when you initiated this charge on a stored card (chargePaymentMethod or an
+   * agreement), false for a payer in a hosted checkout session.
+   */
+  isRecurring: boolean
+  /**
+   * The agreement this session took the first payment for, or the agreement a charge was
+   * made under. Pending until the approval activates it. Absent (null) on a one-off payment.
+   */
+  agreement?: CheckoutStatusAgreement | null
+  /**
+   * The data.sequence of the latest charge.* webhook event about this transaction, so you
+   * can order this read against those events. 0 on a checkout payment, which announces
+   * payment.* events only, and before the first charge.* event.
+   */
+  sequence: number
   [key: string]: unknown
 }
+
+/** The agreement on a status read: enough to know whether the subscription started. */
+export interface CheckoutStatusAgreement {
+  /** The agr_ handle. */
+  id: string
+  /** pending until the approval activates it. Treat a value you do not recognise as not active. */
+  status: AgreementStatus | (string & {})
+  /** When the next charge is due (ISO 8601 UTC). Null while pending and once the agreement ended. */
+  nextChargeAt?: string | null
+  [key: string]: unknown
+}
+
+/**
+ * Every status an agreement can report, in the gateway's own order.
+ *
+ * pending: created, nothing charged; the subscription session activates it. active: the
+ * first period is paid and the platform charges each period. past_due: a period's charge
+ * failed for good (pastDueReason says why); a new card that pays the period makes it active
+ * again. cancelled: ended by you, no further charges. completed: every period of a plan with
+ * a fixed periodCount was charged. failed: reserved, the platform does not set it today.
+ * Treat a value you do not recognise as not billing.
+ */
+export const AGREEMENT_STATUSES = ['pending', 'active', 'past_due', 'cancelled', 'completed', 'failed'] as const
+
+export type AgreementStatus = (typeof AGREEMENT_STATUSES)[number]
 
 /**
  * Every state a stored payment method can be in, in the gateway's own order.
@@ -351,6 +413,14 @@ export interface PaymentMethodCharge {
   declineCode: string | null
   /** The transaction the charge created; readable with {@link DominaiteClient.getStatus}. */
   transactionId: string
+  /** The agr_ handle of the agreement the charge was made under; null without one. */
+  agreementId: string | null
+  /**
+   * The charge's outcome counter: the data.sequence of its charge.succeeded or charge.failed
+   * webhook when the charge was decided at once, 0 while pending. A replay returns the first
+   * answer, so a later webhook can be higher; getStatus() carries the live value.
+   */
+  sequence: number
   [key: string]: unknown
 }
 
