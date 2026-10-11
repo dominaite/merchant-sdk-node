@@ -917,6 +917,16 @@ export interface PaymentWebhookData {
    * whose event has no storedPaymentMethod, call getStatus() to pick the card up.
    */
   storedPaymentMethod?: StoredPaymentMethod | null
+  /**
+   * True on every verification.* event, false on payment.* events. Absent on deliveries
+   * from a gateway that predates it.
+   */
+  verifyOnly?: boolean
+  /**
+   * On verification.failed: why the issuer declined, with the same values as
+   * {@link CheckoutStatus.declineClass}. Null for an abandoned checkout and on payment.* events.
+   */
+  declineClass?: DeclineClass | (string & {}) | null
   [key: string]: unknown
 }
 
@@ -1008,7 +1018,23 @@ export type ChargeWebhookEvent = WebhookEvent<
 >
 
 /**
+ * The events of a verify-only session, on the payment.* data with verifyOnly true. A
+ * verify-only session never sends payment.* events. verification.succeeded: the card is
+ * checked; data.storedPaymentMethod is the saved card, or null when you must read it with
+ * getStatus(). verification.failed: the issuer declined or the payer abandoned the
+ * checkout, and no card was saved.
+ */
+export type VerificationWebhookEvent = WebhookEvent<
+  'verification.succeeded' | 'verification.failed',
+  PaymentWebhookData
+>
+
+/**
  * Every event type this SDK version models; narrow on `type`. A type added to the gateway
  * later still parses, with the same envelope, so check `type` before trusting `data`.
  */
-export type DominaiteWebhookEvent = PaymentWebhookEvent | AgreementWebhookEvent | ChargeWebhookEvent
+export type DominaiteWebhookEvent =
+  | PaymentWebhookEvent
+  | AgreementWebhookEvent
+  | ChargeWebhookEvent
+  | VerificationWebhookEvent

@@ -102,6 +102,7 @@ export type {
   TransactionStatus,
   TransactionType,
   UpdatePlanParams,
+  VerificationWebhookEvent,
   WalletType,
   WebhookEndpoint,
   WebhookEndpointStatus,

@@ -143,3 +143,25 @@ test('a body that is not an envelope throws', () => {
   )
   assert.throws(() => parseWebhookEvent(Buffer.from(CHARGE_EVENT)), TypeError)
 })
+
+// A verification.failed as the gateway serializes it: the payment.* data, verifyOnly true and
+// the decline class, with no card saved.
+const VERIFICATION_FAILED_EVENT =
+  '{"id":"6d7e8f9a-0b1c-4d2e-8f3a-4b5c6d7e8f9a","type":"verification.failed","apiVersion":"2026-09-25","createdAt":"2026-10-11T10:00:00Z","data":{"transactionId":"0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0","status":"failed","previousStatus":"pending","kind":"sale","amount":100,"grossAmount":100,"surchargeAmount":null,"currency":"EUR","paymentMethod":"card","walletType":null,"originalTransactionId":null,"idempotencyKey":"card-check-7","orderReference":"card-check-7","orderId":"ord_2","pspReference":null,"description":null,"paymentMethodBrand":"visa","paymentMethodLast4":"0002","storedPaymentMethod":null,"verifyOnly":true,"declineClass":"soft_funds"}}'
+
+test('a verification event parses with verifyOnly and the decline class', () => {
+  const event = parseWebhookEvent(VERIFICATION_FAILED_EVENT)
+
+  assert.equal(event.type, 'verification.failed')
+  assert.equal(event.data.verifyOnly, true)
+  assert.equal(event.data.declineClass, 'soft_funds')
+  assert.equal(event.data.storedPaymentMethod, null)
+})
+
+test('a payment event sent with verifyOnly false and declineClass null keeps both as sent', () => {
+  const body = SAVED_CARD_EVENT.replace('"retiredReason":null}}', '"retiredReason":null},"verifyOnly":false,"declineClass":null}')
+  const event = parseWebhookEvent(body)
+
+  assert.equal(event.data.verifyOnly, false)
+  assert.equal(event.data.declineClass, null)
+})
