@@ -118,6 +118,30 @@ test('a full refund sends no amount key at all, not a null one', async () => {
   assert.equal(calls[0].init.headers['Idempotency-Key'], REFUND_KEY)
 })
 
+test('createRefund sends a field it does not model, as given, and signs it', async () => {
+  const { fetchImpl, calls } = recordingFetch({ success: true, data: QUEUED }, 202)
+
+  await makeClient(fetchImpl).createRefund(TRANSACTION_ID, {
+    amount: 1500,
+    futureField: 'kept',
+    amountForgotten: undefined,
+    idempotencyKey: REFUND_KEY,
+  })
+
+  const { init } = calls[0]
+  assert.equal(init.body, '{"amount":1500,"futureField":"kept"}')
+  assert.equal(
+    init.headers['X-Signature'],
+    expectedSignature({
+      timestamp: init.headers['X-Timestamp'],
+      method: 'POST',
+      path: `/merchant-api/payments/${TRANSACTION_ID}/refunds`,
+      idempotencyKey: REFUND_KEY,
+      body: init.body,
+    }),
+  )
+})
+
 test('createRefund resolves with the queued refund, absent fields read as null', async () => {
   const { fetchImpl } = recordingFetch({ success: true, data: QUEUED }, 202)
 
@@ -263,4 +287,96 @@ test('a refund id that would not stay one path segment is refused before signing
     await assert.rejects(() => makeClient(fetchImpl).getRefund(TRANSACTION_ID, refundId), TypeError)
   }
   assert.equal(calls.length, 0)
+})
+
+const REFUND_LIST = {
+  transactionId: TRANSACTION_ID,
+  currency: 'HUF',
+  refundedAmount: 2500,
+  refundableAmount: 7500,
+  refunds: [
+    { ...QUEUED, refundId: 're_00000000000000000000000000000002', status: 'pending' },
+    {
+      ...QUEUED,
+      refundId: 're_00000000000000000000000000000001',
+      status: 'succeeded',
+      amount: 2500,
+      completedAt: '2026-10-11T09:00:00Z',
+    },
+  ],
+}
+
+test('listRefunds reads the refunds path, signing an empty key and an empty body', async () => {
+  const { fetchImpl, calls } = recordingFetch({ success: true, data: REFUND_LIST })
+
+  await makeClient(fetchImpl).listRefunds(TRANSACTION_ID.toUpperCase())
+
+  const { url, init } = calls[0]
+  const path = `/merchant-api/payments/${TRANSACTION_ID}/refunds`
+  assert.equal(url, BASE_URL + path)
+  assert.equal(init.method, 'GET')
+  assert.equal(init.body, undefined)
+  assert.equal(init.headers['Idempotency-Key'], undefined)
+  assert.equal(
+    init.headers['X-Signature'],
+    expectedSignature({ timestamp: init.headers['X-Timestamp'], method: 'GET', path, idempotencyKey: '', body: '' }),
+  )
+})
+
+test('listRefunds resolves the totals and every refund in the shape getRefund returns, newest first', async () => {
+  const { fetchImpl } = recordingFetch({ success: true, data: REFUND_LIST })
+
+  const list = await makeClient(fetchImpl).listRefunds(TRANSACTION_ID)
+
+  assert.equal(list.transactionId, TRANSACTION_ID)
+  assert.equal(list.currency, 'HUF')
+  assert.equal(list.refundedAmount, 2500)
+  assert.equal(list.refundableAmount, 7500)
+  assert.deepEqual(
+    list.refunds.map((refund) => refund.refundId),
+    ['re_00000000000000000000000000000002', 're_00000000000000000000000000000001'],
+  )
+  const getRefundShape = await makeClient(recordingFetch({ success: true, data: REFUND_LIST.refunds[1] }).fetchImpl)
+    .getRefund(TRANSACTION_ID, REFUND_LIST.refunds[1].refundId)
+  assert.deepEqual(list.refunds[1], getRefundShape)
+  assert.equal(list.refunds[0].completedAt, null)
+  assert.equal(list.refunds[0].failureCode, null)
+})
+
+test('listRefunds resolves a payment without refunds with an empty list', async () => {
+  const empty = { transactionId: TRANSACTION_ID, currency: 'EUR', refundedAmount: 0, refundableAmount: 1999, refunds: [] }
+  const { fetchImpl } = recordingFetch({ success: true, data: empty })
+
+  const list = await makeClient(fetchImpl).listRefunds(TRANSACTION_ID)
+
+  assert.deepEqual(list, empty)
+})
+
+test('listRefunds rejects a payment that is not yours with RefundError PAYMENT_NOT_FOUND', async () => {
+  const body = { success: false, error: { code: 'PAYMENT_NOT_FOUND', message: 'No payment', statusCode: 404 } }
+  const { fetchImpl } = recordingFetch(body, 404)
+
+  const error = await rejects(() => makeClient(fetchImpl).listRefunds(TRANSACTION_ID))
+
+  assert.ok(error instanceof RefundError)
+  assert.equal(error.errorCode, 'PAYMENT_NOT_FOUND')
+  assert.equal(error.httpStatus, 404)
+  assert.equal(error.retryable, false)
+  assert.deepEqual(error.result, body)
+})
+
+test('listRefunds refuses a transactionId that is not a UUID before sending', async () => {
+  const { fetchImpl, calls } = recordingFetch({ success: true, data: REFUND_LIST })
+
+  await assert.rejects(() => makeClient(fetchImpl).listRefunds('../plans'), TypeError)
+  assert.equal(calls.length, 0)
+})
+
+test('listRefunds rejects a 200 without a list body as an ApiError', async () => {
+  const { fetchImpl } = recordingFetch({ success: true, data: QUEUED })
+
+  const error = await rejects(() => makeClient(fetchImpl).listRefunds(TRANSACTION_ID))
+
+  assert.ok(error instanceof ApiError)
+  assert.ok(!(error instanceof RefundError))
 })

@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import {
+  AUTHORIZATION_ERROR_CODES,
   SESSION_REFUSAL_ERROR_CODES,
   STOREFRONT_ERROR_CODES,
   TRANSACTION_STATUSES,
@@ -56,6 +57,17 @@ test('the storefront codes are exactly the gateway storefront group, in order, n
       ['STOREFRONT_INACTIVE', 409, false],
       ['STOREFRONT_NOT_WHITELISTED', 409, false],
     ],
+  )
+})
+
+test('the authorization codes are exactly the gateway authorization group, in order, 403 and none retryable', () => {
+  assert.deepEqual(
+    [...AUTHORIZATION_ERROR_CODES],
+    WIRE.errorCodes.authorization.map((entry) => entry.code),
+  )
+  assert.deepEqual(
+    WIRE.errorCodes.authorization.map(({ code, httpStatus, retry }) => [code, httpStatus, retry]),
+    [['INSUFFICIENT_SCOPE', 403, false]],
   )
 })
 

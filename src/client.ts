@@ -17,17 +17,30 @@ import {
 import { countCodePoints, MAX_FIELD_CODE_POINTS, normalizeIdempotencyKey } from './idempotency.js'
 import { signRequest } from './signing.js'
 import type {
+  Agreement,
   ChargePaymentMethodParams,
   CheckoutSession,
   CheckoutStatus,
+  CreateAgreementParams,
   CreateCheckoutSessionParams,
+  CreatedWebhookEndpoint,
+  CreatePlanParams,
   CreateRefundParams,
+  CreateWebhookEndpointParams,
   DominaiteClientOptions,
+  IntegrationContract,
+  ListTransactionsParams,
   PaymentMethodCharge,
   Ping,
+  Plan,
   Refund,
+  RefundList,
   RetryOptions,
   StoredPaymentMethod,
+  Transaction,
+  TransactionPage,
+  UpdatePlanParams,
+  WebhookEndpoint,
 } from './types.js'
 
 const DEFAULT_BASE_URL = 'https://api.dominaite.com/payments'
@@ -35,8 +48,13 @@ const SESSIONS_PATH = '/merchant-api/checkout/sessions'
 const PAYMENT_METHODS_PATH = '/merchant-api/payment-methods'
 const PAYMENTS_PATH = '/merchant-api/payments'
 const PING_PATH = '/merchant-api/ping'
+const INTEGRATION_CONTRACT_PATH = '/merchant-api/integration/contract'
+const PLANS_PATH = '/merchant-api/plans'
+const AGREEMENTS_PATH = '/merchant-api/agreements'
+const WEBHOOKS_PATH = '/merchant-api/webhooks'
+const TRANSACTIONS_PATH = '/merchant-api/transactions'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
-const SDK_VERSION = '0.4.0'
+const SDK_VERSION = '0.5.0'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /**
  * A payment method id is opaque (pm_...), so this only pins what keeps it a single path
@@ -47,6 +65,8 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const PAYMENT_METHOD_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/
 /** A refund id (re_...) is opaque too, and goes into the signed path the same way. */
 const REFUND_ID_PATTERN = PAYMENT_METHOD_ID_PATTERN
+/** Plan (plan_...) and agreement (agr_...) ids are case-sensitive handles, signed verbatim too. */
+const HANDLE_PATTERN = PAYMENT_METHOD_ID_PATTERN
 /** Hard ceiling on a response body. Past this the read is abandoned, not buffered. */
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 /** Hosts allowed to be reached over plain http, for local development only. */
@@ -143,14 +163,35 @@ export class DominaiteClient {
   }
 
   /**
+   * Reads the public integration contract: the API's own description of its routes,
+   * fields, statuses, error codes, webhook events and signing rules. Every key may read it.
+   * Use it to compare what your integration expects with the live API.
+   *
+   * Throws RateLimitError, ApiError or TransportError.
+   */
+  async getIntegrationContract(): Promise<IntegrationContract> {
+    // GET signs an EMPTY idempotency key and an EMPTY body. The route is public, so the API
+    // does not check the signature, but sending it costs nothing.
+    const reply = await this.#send('GET', INTEGRATION_CONTRACT_PATH, null, '')
+    const data = readObject(reply, 'contract')
+    return { ...data, version: stringOr(data['version'], '') }
+  }
+
+  /**
    * Creates a hosted checkout session for one payment.
    *
    * idempotencyKey is required: derive it from the order with orderIdempotencyKey(), so a
    * reload or a retry replays the same session instead of opening a second payment. A
    * missing or empty key throws TypeError before anything is sent.
    *
+   * With verifyOnly: true the session saves the payer's card without a payment: send
+   * amount 0 or leave it out. Every other session needs an amount above 0; anything else
+   * throws TypeError before anything is sent.
+   *
    * Throws AuthenticationError (wrong credentials, bad signature, clock off, IP not
-   * allowlisted - fix config, do not retry), CheckoutRefusedError (the gateway refused;
+   * allowlisted - fix config, do not retry; 403 INSUFFICIENT_SCOPE for a key without the
+   * payments scope; 403 VERIFY_ONLY_NOT_ENABLED for verifyOnly on an account without it),
+   * CheckoutRefusedError (the gateway refused;
    * inspect errorCode), StorefrontError (the website this session belongs to is not
    * whitelisted, inactive or not the key's own - fix the storefront, do not retry),
    * RateLimitError (429 - wait out retryAfterSeconds, then retry with the same key),
@@ -278,11 +319,15 @@ export class DominaiteClient {
    * so retrying after a timeout WITH THE SAME KEY never charges the card twice; the
    * gateway replays its first answer.
    *
+   * Send agreementId to make the charge under an agreement from createAgreement(): the
+   * gateway holds it to the agreement's terms, and the charge carries the agreementId back.
+   *
    * A decline is not an exception: the gateway answers HTTP 402 and this resolves with a
-   * charge whose status is 'failed' plus a declineClass telling you whether to give up on
-   * the card (hard), wait (soft_funds, soft_other) or bring the customer back for a
-   * hosted session (soft_sca_required). 'pending' is not terminal - poll
-   * getStatus(charge.transactionId).
+   * charge whose status is 'failed'. Its declineClass says whether to give up on the card
+   * (hard), wait (soft_funds, soft_other) or bring the customer back for a hosted session
+   * (soft_sca_required). declineClass can be null, for example when nobody declined the
+   * payment, and getStatus(charge.transactionId) carries the latest class. Never read null
+   * as hard. 'pending' is not terminal - poll getStatus(charge.transactionId).
    *
    * Throws ChargeError when the gateway answered with a code instead of a charge:
    * CHARGE_OUTCOME_UNKNOWN (502, the charge MAY have happened - poll
@@ -410,8 +455,262 @@ export class DominaiteClient {
     return readRefund(reply)
   }
 
+  /**
+   * Lists the refunds of one of your payments that were created through this API, newest
+   * first, with the payment's totals: refundedAmount counts every refund of the payment,
+   * the dashboard's included, and refundableAmount is what a new refund could take right
+   * now. A payment without refunds resolves with an empty list.
+   *
+   * Throws RefundError PAYMENT_NOT_FOUND (404) for a payment that is not yours. Otherwise
+   * AuthenticationError, RateLimitError, ApiError or TransportError.
+   */
+  async listRefunds(transactionId: string): Promise<RefundList> {
+    const id = normalizeTransactionId(transactionId)
+    // GET signs an EMPTY idempotency key and an EMPTY body.
+    const reply = await this.#send('GET', `${PAYMENTS_PATH}/${id}/refunds`, null, '')
+    const data = reply.envelope['data']
+    if (reply.status < 300 && isPlainObject(data) && Array.isArray(data['refunds'])) {
+      return {
+        ...data,
+        transactionId: stringOr(data['transactionId'], ''),
+        currency: stringOr(data['currency'], ''),
+        refundedAmount: typeof data['refundedAmount'] === 'number' ? data['refundedAmount'] : 0,
+        refundableAmount: typeof data['refundableAmount'] === 'number' ? data['refundableAmount'] : 0,
+        refunds: data['refunds'].filter(isPlainObject).map(toRefund),
+      }
+    }
+    throw refundFailure(reply, 'The API answered the refund list without a list body')
+  }
+
+  /**
+   * Creates a plan: a recurring price you sell. Answers the new plan. The same
+   * idempotencyKey with the same body answers the same plan again, so a create whose answer
+   * you lost is safe to repeat. Amount, currency and interval never change: for a new
+   * price, create a new plan and archive the old one with deletePlan().
+   *
+   * Throws ApiError: a validation code on a 400, or IDEMPOTENCY_KEY_REUSED (422) when the
+   * key was first used with another body. Otherwise AuthenticationError, RateLimitError or
+   * TransportError (network or 5xx: retry with the same key).
+   */
+  async createPlan(params: CreatePlanParams): Promise<Plan> {
+    const { idempotencyKey, body } = prepareKeyedBody(params)
+    const reply = await this.#send('POST', PLANS_PATH, body, idempotencyKey)
+    return toPlan(readObject(reply, 'plan'))
+  }
+
+  /**
+   * Lists your plans: at most 200, active plans first, newest first within a status. The
+   * route has no pages; read a plan with getPlan() when you have more.
+   *
+   * Throws AuthenticationError, RateLimitError, ApiError or TransportError.
+   */
+  async listPlans(): Promise<Plan[]> {
+    // GET signs an EMPTY idempotency key and an EMPTY body.
+    const reply = await this.#send('GET', PLANS_PATH, null, '')
+    return readArray(reply, 'plan list').map(toPlan)
+  }
+
+  /**
+   * Reads one of your plans. planId is the plan_ id exactly as createPlan() returned it:
+   * it is case-sensitive.
+   *
+   * Throws ApiError PLAN_NOT_FOUND (404) for a plan that is not yours. Otherwise
+   * AuthenticationError, RateLimitError, ApiError or TransportError.
+   */
+  async getPlan(planId: string): Promise<Plan> {
+    const id = normalizeHandle(planId, 'planId', 'the plan_ id returned by createPlan()')
+    const reply = await this.#send('GET', `${PLANS_PATH}/${id}`, null, '')
+    return toPlan(readObject(reply, 'plan'))
+  }
+
+  /**
+   * Changes the name, the trial or the cancel page of one of your plans (PATCH) and answers
+   * the plan as it is now. Send at least one of them. A trial change reaches only the
+   * agreements created after it. Amount, currency and interval never change.
+   *
+   * The Idempotency-Key is optional here: the API does not replay a plan update, and
+   * repeating the same update is harmless. The SDK sends and signs a key only when you
+   * give one.
+   *
+   * Throws ApiError: PLAN_NOT_FOUND (404), or a validation code on a 400. Otherwise
+   * AuthenticationError, RateLimitError or TransportError.
+   */
+  async updatePlan(planId: string, params: UpdatePlanParams): Promise<Plan> {
+    const id = normalizeHandle(planId, 'planId', 'the plan_ id returned by createPlan()')
+    if (!isPlainObject(params)) {
+      throw new TypeError('params must be an object with the fields to change')
+    }
+    const { idempotencyKey: providedKey, ...bodyParams } = params
+    // No key signs an EMPTY key and sends no Idempotency-Key header.
+    const idempotencyKey = providedKey === undefined || providedKey === null ? '' : normalizeIdempotencyKey(providedKey)
+    const reply = await this.#send('PATCH', `${PLANS_PATH}/${id}`, encodeBody(bodyParams), idempotencyKey)
+    return toPlan(readObject(reply, 'plan'))
+  }
+
+  /**
+   * Archives one of your plans: it takes no new agreements, and the agreements it already
+   * has keep billing. Resolves on HTTP 204. Archiving an archived plan resolves again, so a
+   * timed-out call is safe to repeat.
+   *
+   * Throws ApiError PLAN_NOT_FOUND (404) for a plan that is not yours. Otherwise
+   * AuthenticationError, RateLimitError, ApiError or TransportError.
+   */
+  async deletePlan(planId: string): Promise<void> {
+    const id = normalizeHandle(planId, 'planId', 'the plan_ id returned by createPlan()')
+    // DELETE signs an EMPTY idempotency key and an EMPTY body, like GET.
+    const reply = await this.#send('DELETE', `${PLANS_PATH}/${id}`, null, '')
+    if (reply.status >= 400) {
+      throw rejection(reply)
+    }
+  }
+
+  /**
+   * Subscribes one of your customers to a plan. The agreement starts pending and charges
+   * nothing: the subscription session (createCheckoutSession() with agreementId) takes the
+   * first payment, saves the card and activates it. Then the platform charges each period.
+   * The same idempotencyKey with the same body answers the same agreement again.
+   *
+   * Throws ApiError: PLAN_NOT_FOUND or PAYMENT_METHOD_NOT_FOUND (404); PLAN_NOT_ACTIVE or
+   * PAYMENT_METHOD_NOT_ACTIVE (409); AGREEMENT_CONSENT_REQUIRED, MAX_AMOUNT_BELOW_PLAN_AMOUNT,
+   * PAYMENT_METHOD_CURRENCY_MISMATCH, PAYMENT_METHOD_CURRENCY_UNKNOWN or
+   * IDEMPOTENCY_KEY_REUSED (422); a validation code on a 400. Nothing is created on any of
+   * them. Otherwise AuthenticationError, RateLimitError or TransportError (network or 5xx:
+   * retry with the same key).
+   */
+  async createAgreement(params: CreateAgreementParams): Promise<Agreement> {
+    const { idempotencyKey, body } = prepareKeyedBody(params)
+    const reply = await this.#send('POST', AGREEMENTS_PATH, body, idempotencyKey)
+    return toAgreement(readObject(reply, 'agreement'))
+  }
+
+  /**
+   * Reads one of your agreements: its status, the next charge date, why it is past_due,
+   * and its own copy of the price. agreementId is the agr_ id exactly as createAgreement()
+   * returned it: it is case-sensitive.
+   *
+   * Throws ApiError AGREEMENT_NOT_FOUND (404) for an agreement that is not yours. Otherwise
+   * AuthenticationError, RateLimitError, ApiError or TransportError.
+   */
+  async getAgreement(agreementId: string): Promise<Agreement> {
+    const id = normalizeHandle(agreementId, 'agreementId', 'the agr_ id returned by createAgreement()')
+    const reply = await this.#send('GET', `${AGREEMENTS_PATH}/${id}`, null, '')
+    return toAgreement(readObject(reply, 'agreement'))
+  }
+
+  /**
+   * Cancels one of your agreements: pending, active or past_due. No further charge is
+   * scheduled; a charge already placed is not reversed. Resolves on HTTP 204. Cancelling a
+   * cancelled agreement resolves again, so a timed-out call is safe to repeat.
+   *
+   * Throws ApiError: AGREEMENT_NOT_FOUND (404), or AGREEMENT_ENDED (409) when the agreement
+   * already completed or failed. Otherwise AuthenticationError, RateLimitError or
+   * TransportError.
+   */
+  async cancelAgreement(agreementId: string): Promise<void> {
+    const id = normalizeHandle(agreementId, 'agreementId', 'the agr_ id returned by createAgreement()')
+    // DELETE signs an EMPTY idempotency key and an EMPTY body, like GET.
+    const reply = await this.#send('DELETE', `${AGREEMENTS_PATH}/${id}`, null, '')
+    if (reply.status >= 400) {
+      throw rejection(reply)
+    }
+  }
+
+  /**
+   * Registers a webhook endpoint: the API delivers the events you name to url, signed with
+   * the endpoint's secret. Needs a key with the webhooks:manage scope.
+   *
+   * The answer carries the whsec_ secret ONCE. Store it at once: a repeat with the same
+   * idempotencyKey answers the same endpoint with secret null, and no other route shows
+   * it. A create that got no answer, a timeout or a 5xx may still have registered the
+   * endpoint, so repeat it with the SAME key: that replaces the unanswered endpoint and
+   * answers a fresh id and secret.
+   *
+   * Throws ApiError: WEBHOOK_URL_REJECTED (400) for a URL that is not HTTPS on a public
+   * host; WEBHOOK_LIMIT_REACHED (409) at 25 active endpoints; WEBHOOK_ALREADY_REGISTERED
+   * (409) when the key registered an endpoint more than a day ago that still exists (its
+   * id is at result.error.params.webhookId); DUPLICATE_REQUEST (409, retry with the same
+   * key); IDEMPOTENCY_KEY_REUSED (422); a validation code on a 400. Otherwise
+   * AuthenticationError (403 INSUFFICIENT_SCOPE without webhooks:manage), RateLimitError
+   * or TransportError.
+   */
+  async createWebhookEndpoint(params: CreateWebhookEndpointParams): Promise<CreatedWebhookEndpoint> {
+    const { idempotencyKey, body } = prepareKeyedBody(params)
+    const reply = await this.#send('POST', WEBHOOKS_PATH, body, idempotencyKey)
+    const data = readObject(reply, 'webhook endpoint')
+    return { ...toWebhookEndpoint(data), secret: stringOrNull(data['secret']) }
+  }
+
+  /**
+   * Lists your webhook endpoints, newest first, never with a secret: every active endpoint
+   * and the newest inactive ones. The route has no pages. Needs a key with the
+   * webhooks:manage scope.
+   *
+   * Throws AuthenticationError (403 INSUFFICIENT_SCOPE without webhooks:manage),
+   * RateLimitError, ApiError or TransportError.
+   */
+  async listWebhookEndpoints(): Promise<WebhookEndpoint[]> {
+    // GET signs an EMPTY idempotency key and an EMPTY body.
+    const reply = await this.#send('GET', WEBHOOKS_PATH, null, '')
+    return readArray(reply, 'webhook endpoint list').map(toWebhookEndpoint)
+  }
+
+  /**
+   * Deletes one of your webhook endpoints: it stops receiving deliveries at once. Resolves
+   * on HTTP 204. Needs a key with the webhooks:manage scope.
+   *
+   * A repeat answers 404: the endpoint is gone. So a delete retried after a lost answer
+   * rejects with WEBHOOK_NOT_FOUND; treat that as done.
+   *
+   * Throws ApiError WEBHOOK_NOT_FOUND (404) for an id that is unknown, not yours or already
+   * deleted. Otherwise AuthenticationError (403 INSUFFICIENT_SCOPE without
+   * webhooks:manage), RateLimitError or TransportError.
+   */
+  async deleteWebhookEndpoint(webhookId: string): Promise<void> {
+    const id = normalizeWebhookId(webhookId)
+    // DELETE signs an EMPTY idempotency key and an EMPTY body, like GET.
+    const reply = await this.#send('DELETE', `${WEBHOOKS_PATH}/${id}`, null, '')
+    if (reply.status >= 400) {
+      throw rejection(reply)
+    }
+  }
+
+  /**
+   * Lists your card-not-present payments created in a window, one page at a time, oldest
+   * first: checkout payments, saved-card and subscription charges, and verify-only
+   * sessions. Refunds are not rows of their own: they show on their payment as
+   * refundedAmount and status. Needs a key with the transactions:read scope.
+   *
+   * Page through a window like this:
+   *
+   *   let cursor: string | undefined
+   *   do {
+   *     const page = await client.listTransactions({ from, to, cursor })
+   *     for (const transaction of page.items) { ... }
+   *     cursor = page.nextCursor ?? undefined
+   *   } while (cursor)
+   *
+   * The window is from (inclusive) to to (exclusive), at most 31 days. The parameters go
+   * in the query string, which is not signed: the SDK signs the path only.
+   *
+   * Throws ApiError with a validation code on a 400 (window, status, limit or cursor).
+   * Otherwise AuthenticationError (403 INSUFFICIENT_SCOPE without transactions:read),
+   * RateLimitError or TransportError.
+   */
+  async listTransactions(params: ListTransactionsParams): Promise<TransactionPage> {
+    const query = transactionQuery(params)
+    // GET signs the path WITHOUT the query string, an EMPTY idempotency key and an EMPTY body.
+    const reply = await this.#send('GET', TRANSACTIONS_PATH, null, '', query)
+    const data = readObject(reply, 'transaction page')
+    const items = data['items']
+    return {
+      ...data,
+      items: Array.isArray(items) ? items.filter(isPlainObject).map(toTransaction) : [],
+      nextCursor: stringOrNull(data['nextCursor']),
+    }
+  }
+
   #prepareSessionRequest(params: CreateCheckoutSessionParams): { idempotencyKey: string; body: string } {
-    validateMoneyParams(params)
+    validateMoneyParams(params, params?.verifyOnly === true)
     const { idempotencyKey: providedKey, ...bodyParams } = params
     return { idempotencyKey: normalizeIdempotencyKey(providedKey), body: encodeBody(bodyParams) }
   }
@@ -422,18 +721,10 @@ export class DominaiteClient {
       throw new TypeError('description must be a string')
     }
 
-    // Built field by field, not spread: the body is what gets signed, and the contract
-    // for this route is exactly these fields in this order.
-    const bodyParams: Record<string, unknown> = {
-      amount: params.amount,
-      currency: params.currency,
-      orderReference: params.orderReference,
-    }
-    if (params.description !== undefined) {
-      bodyParams['description'] = params.description
-    }
-
-    return { idempotencyKey: normalizeIdempotencyKey(params.idempotencyKey), body: encodeBody(bodyParams) }
+    // Every field goes out as given, in the order given, so a field the gateway adds
+    // later needs no new SDK release. The key is a header, never a body field.
+    const { idempotencyKey: providedKey, ...bodyParams } = params
+    return { idempotencyKey: normalizeIdempotencyKey(providedKey), body: encodeBody(bodyParams) }
   }
 
   #prepareRefundRequest(params: CreateRefundParams): { idempotencyKey: string; body: string } {
@@ -441,9 +732,7 @@ export class DominaiteClient {
       throw new TypeError('params must be an object carrying idempotencyKey')
     }
 
-    // Built field by field, not spread: the body is what gets signed, and a full refund
-    // is an absent amount, never a null one.
-    const bodyParams: Record<string, unknown> = {}
+    // A full refund is an absent amount, never a null one: null is refused here.
     if (params.amount !== undefined) {
       if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
         throw new TypeError(
@@ -451,21 +740,20 @@ export class DominaiteClient {
             'omit it to refund everything still refundable',
         )
       }
-      bodyParams['amount'] = params.amount
     }
-    if (params.reason !== undefined) {
-      if (typeof params.reason !== 'string') {
-        throw new TypeError('reason must be a string')
-      }
-      bodyParams['reason'] = params.reason
+    if (params.reason !== undefined && typeof params.reason !== 'string') {
+      throw new TypeError('reason must be a string')
     }
 
-    return { idempotencyKey: normalizeIdempotencyKey(params.idempotencyKey), body: encodeBody(bodyParams) }
+    // Every field goes out as given, so a field the gateway adds later needs no new SDK
+    // release. The key is a header, never a body field.
+    const { idempotencyKey: providedKey, ...bodyParams } = params
+    return { idempotencyKey: normalizeIdempotencyKey(providedKey), body: encodeBody(bodyParams) }
   }
 
   /** Sends and applies the generic failure rules: 5xx is transport, 4xx is ApiError. */
   async #request(
-    method: 'GET' | 'POST' | 'DELETE',
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     path: string,
     body: string | null,
     idempotencyKey: string,
@@ -484,10 +772,11 @@ export class DominaiteClient {
    * can read the code and the data the gateway attached before deciding what it is.
    */
   async #send(
-    method: 'GET' | 'POST' | 'DELETE',
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     path: string,
     body: string | null,
     idempotencyKey: string,
+    query = '',
   ): Promise<Reply> {
     const json = body ?? ''
     const timestamp = Math.floor(Date.now() / 1000).toString()
@@ -514,7 +803,8 @@ export class DominaiteClient {
 
     let response: Response
     try {
-      response = await this.#fetch(this.#baseUrl + path, {
+      // The query string goes on the URL only: the signature covers the path alone.
+      response = await this.#fetch(this.#baseUrl + path + query, {
         method,
         headers,
         // Never follow a redirect: the hop would carry the signed headers to whatever
@@ -573,27 +863,58 @@ export class DominaiteClient {
     const envelopeError = isPlainObject(envelope['error']) ? envelope['error'] : {}
 
     if (response.status === 401 || response.status === 403) {
+      const errorCode = stringOr(payload['errorCode'], stringOr(envelopeError['code'], 'UNAUTHORIZED'))
       throw new AuthenticationError(
-        stringOr(payload['errorCode'], stringOr(envelopeError['code'], 'UNAUTHORIZED')),
-        'Authentication failed - check your key id, secret, and server clock.',
+        errorCode,
+        accessDeniedMessage(response.status, errorCode, stringOr(envelopeError['message'], '')),
+        response.status,
       )
     }
     if (response.status === 429) {
       // Deliberately not a TransportError: the retry helper would hammer a limiter that
       // is already telling us to stop. The caller waits out retryAfterSeconds instead.
       const retryAfterSeconds = parseRetryAfterSeconds(response.headers?.get('Retry-After'))
+      const errorCode = stringOr(envelopeError['code'], stringOr(payload['errorCode'], ''))
       const wait =
         retryAfterSeconds === null
           ? 'Retry with the same idempotency key after backing off.'
           : `Wait ${retryAfterSeconds}s (retryAfterSeconds), then retry with the same idempotency key.`
       throw new RateLimitError(
-        `Rate limit exceeded (HTTP 429). ${wait}`,
+        `Rate limit exceeded (HTTP 429${errorCode === '' ? '' : ` ${errorCode}`}). ${wait}`,
         retryAfterSeconds,
+        errorCode === '' ? undefined : errorCode,
+        envelope,
       )
     }
 
     return { status: response.status, envelope, payload, error: envelopeError }
   }
+}
+
+/**
+ * The message of an AuthenticationError. The clock hint is for 401 only: a 403 means the
+ * key signed correctly, so the key id, secret and clock are fine, and the key may not call
+ * the route.
+ */
+function accessDeniedMessage(httpStatus: number, errorCode: string, apiMessage: string): string {
+  if (httpStatus === 401) {
+    return 'Authentication failed - check your key id, secret, and server clock.'
+  }
+  if (errorCode === 'INSUFFICIENT_SCOPE') {
+    // The API's own message names the scope the route needs.
+    const scope = apiMessage === '' ? 'This API key does not have the scope this route requires' : apiMessage
+    return (
+      `${scope.replace(/\.+$/, '')}. ` +
+      "A key's scopes are fixed when it is issued: use a key that holds this scope."
+    )
+  }
+  if (errorCode === 'VERIFY_ONLY_NOT_ENABLED') {
+    return (
+      'Verify-only sessions are not enabled for your account. Nothing was created. ' +
+      'We switch it on for your account: contact Dominaite support.'
+    )
+  }
+  return `Access denied (HTTP 403 ${errorCode}): this API key may not call this route.`
 }
 
 /** The generic reading of a failed reply: 5xx is the API being unavailable, 4xx a rejection. */
@@ -608,9 +929,9 @@ function rejection(reply: Reply): DominaiteError {
   const errorCode = stringOr(reply.payload['errorCode'], stringOr(reply.error['code'], ''))
   const message = stringOr(reply.payload['errorMessage'], stringOr(reply.error['message'], 'Request rejected'))
   if (isStorefrontErrorCode(errorCode)) {
-    return new StorefrontError(reply.status, errorCode, message)
+    return new StorefrontError(reply.status, errorCode, message, reply.envelope)
   }
-  return new ApiError(reply.status, message, errorCode === '' ? undefined : errorCode)
+  return new ApiError(reply.status, message, errorCode === '' ? undefined : errorCode, reply.envelope)
 }
 
 /**
@@ -623,9 +944,14 @@ function readRefund(reply: Reply): Refund {
     return toRefund(data)
   }
 
+  throw refundFailure(reply, 'The API answered the refund without a refund body')
+}
+
+/** The error for a refund route reply that carried no refund: a RefundError for the refund codes. */
+function refundFailure(reply: Reply, noBodyMessage: string): DominaiteError {
   const errorCode = stringOr(reply.error['code'], '')
   if (reply.status >= 400 && reply.status < 500 && isRefundErrorCode(errorCode)) {
-    throw new RefundError(
+    return new RefundError(
       reply.status,
       errorCode,
       stringOr(reply.error['message'], 'The refund was refused.'),
@@ -633,9 +959,9 @@ function readRefund(reply: Reply): Refund {
     )
   }
   if (reply.status >= 400) {
-    throw rejection(reply)
+    return rejection(reply)
   }
-  throw new ApiError(reply.status, 'The API answered the refund without a refund body')
+  return new ApiError(reply.status, noBodyMessage, undefined, reply.envelope)
 }
 
 function isRefundErrorCode(code: string): code is RefundErrorCode {
@@ -678,6 +1004,8 @@ function toCharge(data: Record<string, unknown>): PaymentMethodCharge {
     declineClass: typeof data['declineClass'] === 'string' ? data['declineClass'] : null,
     declineCode: typeof data['declineCode'] === 'string' ? data['declineCode'] : null,
     transactionId: stringOr(data['transactionId'], ''),
+    agreementId: typeof data['agreementId'] === 'string' ? data['agreementId'] : null,
+    sequence: typeof data['sequence'] === 'number' ? data['sequence'] : 0,
   }
 }
 
@@ -699,13 +1027,24 @@ function toStoredPaymentMethod(data: Record<string, unknown>): StoredPaymentMeth
 }
 
 /** The checks shared by every request that moves money: amount, currency, orderReference. */
-function validateMoneyParams(params: { amount: number; currency: string; orderReference: string }): void {
-  for (const required of ['amount', 'currency', 'orderReference'] as const) {
+function validateMoneyParams(
+  params: { amount?: number; currency: string; orderReference: string },
+  verifyOnly = false,
+): void {
+  const requiredFields = verifyOnly
+    ? (['currency', 'orderReference'] as const)
+    : (['amount', 'currency', 'orderReference'] as const)
+  for (const required of requiredFields) {
     if (params?.[required] === undefined || params[required] === null) {
       throw new TypeError(`Missing required parameter: ${required}`)
     }
   }
-  if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
+  if (verifyOnly) {
+    // The platform sets the verification amount, so the gateway takes 0 or nothing.
+    if (params.amount !== undefined && params.amount !== 0) {
+      throw new TypeError('amount must be 0 or left out with verifyOnly: the platform sets the verification amount')
+    }
+  } else if (!Number.isSafeInteger(params.amount) || (params.amount as number) <= 0) {
     throw new TypeError(
       'amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)',
     )
@@ -719,6 +1058,168 @@ function validateMoneyParams(params: { amount: number; currency: string; orderRe
       `orderReference must be at most ${MAX_FIELD_CODE_POINTS} characters`,
     )
   }
+}
+
+/** Splits idempotencyKey (required) off the params and encodes the rest as given. */
+function prepareKeyedBody(params: Record<string, unknown>): { idempotencyKey: string; body: string } {
+  if (!isPlainObject(params)) {
+    throw new TypeError('params must be an object')
+  }
+  const { idempotencyKey: providedKey, ...bodyParams } = params
+  return { idempotencyKey: normalizeIdempotencyKey(providedKey), body: encodeBody(bodyParams) }
+}
+
+/** envelope.data of a 2xx reply when it is an object; the rejection otherwise. */
+function readObject(reply: Reply, what: string): Record<string, unknown> {
+  const data = reply.envelope['data']
+  if (reply.status < 300 && isPlainObject(data)) {
+    return data
+  }
+  if (reply.status >= 400) {
+    throw rejection(reply)
+  }
+  throw new ApiError(reply.status, `The API answered without a ${what} body`, undefined, reply.envelope)
+}
+
+/** The objects in envelope.data of a 2xx reply when it is an array; the rejection otherwise. */
+function readArray(reply: Reply, what: string): Record<string, unknown>[] {
+  const data = reply.envelope['data']
+  if (reply.status < 300 && Array.isArray(data)) {
+    return data.filter(isPlainObject)
+  }
+  if (reply.status >= 400) {
+    throw rejection(reply)
+  }
+  throw new ApiError(reply.status, `The API answered without a ${what}`, undefined, reply.envelope)
+}
+
+function toPlan(data: Record<string, unknown>): Plan {
+  return {
+    ...data,
+    id: stringOr(data['id'], ''),
+    name: stringOr(data['name'], ''),
+    amount: numberOr(data['amount'], 0),
+    currency: stringOr(data['currency'], ''),
+    intervalUnit: stringOr(data['intervalUnit'], ''),
+    intervalCount: numberOr(data['intervalCount'], 1),
+    periodCount: numberOrNull(data['periodCount']),
+    trialDays: numberOr(data['trialDays'], 0),
+    status: stringOr(data['status'], ''),
+    cancelUrl: stringOrNull(data['cancelUrl']),
+    createdAt: stringOr(data['createdAt'], ''),
+    archivedAt: stringOrNull(data['archivedAt']),
+  }
+}
+
+function toAgreement(data: Record<string, unknown>): Agreement {
+  const consent = data['consent']
+  return {
+    ...data,
+    id: stringOr(data['id'], ''),
+    planId: stringOr(data['planId'], ''),
+    customerReference: stringOr(data['customerReference'], ''),
+    storedPaymentMethodId: stringOrNull(data['storedPaymentMethodId']),
+    status: stringOr(data['status'], ''),
+    amount: numberOr(data['amount'], 0),
+    maxAmountPerPeriod: numberOrNull(data['maxAmountPerPeriod']),
+    currency: stringOr(data['currency'], ''),
+    intervalUnit: stringOr(data['intervalUnit'], ''),
+    intervalCount: numberOr(data['intervalCount'], 1),
+    periodCount: numberOrNull(data['periodCount']),
+    trialDays: numberOr(data['trialDays'], 0),
+    nextChargeAt: stringOrNull(data['nextChargeAt']),
+    pastDueReason: stringOrNull(data['pastDueReason']),
+    pastDueAt: stringOrNull(data['pastDueAt']),
+    consent: isPlainObject(consent)
+      ? {
+          ...consent,
+          textVersion: stringOr(consent['textVersion'], ''),
+          acceptedAt: stringOrNull(consent['acceptedAt']),
+          ip: stringOr(consent['ip'], ''),
+          receivedAt: stringOrNull(consent['receivedAt']),
+          receivedFromIp: stringOrNull(consent['receivedFromIp']),
+        }
+      : null,
+    version: numberOr(data['version'], 1),
+    sequence: numberOr(data['sequence'], 0),
+    createdAt: stringOr(data['createdAt'], ''),
+    activatedAt: stringOrNull(data['activatedAt']),
+    cancelledAt: stringOrNull(data['cancelledAt']),
+  }
+}
+
+/** The query string of a transaction list: '?from=...&to=...', every given parameter as given. */
+function transactionQuery(params: ListTransactionsParams): string {
+  if (!isPlainObject(params)) {
+    throw new TypeError('params must be an object with from and to')
+  }
+  const search = new URLSearchParams()
+  for (const [name, value] of Object.entries(params)) {
+    if (value === undefined || value === null) {
+      continue
+    }
+    if (value instanceof Date) {
+      if (Number.isNaN(value.getTime())) {
+        throw new TypeError(`${name} must be a valid Date`)
+      }
+      search.append(name, value.toISOString())
+      continue
+    }
+    search.append(name, String(value))
+  }
+  for (const name of ['from', 'to']) {
+    if ((search.get(name) ?? '') === '') {
+      throw new TypeError(`${name} is required: an ISO 8601 UTC instant or a Date`)
+    }
+  }
+  return `?${search.toString()}`
+}
+
+function toTransaction(data: Record<string, unknown>): Transaction {
+  return {
+    ...data,
+    transactionId: stringOr(data['transactionId'], ''),
+    orderReference: stringOrNull(data['orderReference']),
+    type: stringOr(data['type'], ''),
+    status: stringOr(data['status'], ''),
+    amount: numberOr(data['amount'], 0),
+    currency: stringOr(data['currency'], ''),
+    createdAt: stringOr(data['createdAt'], ''),
+    completedAt: stringOrNull(data['completedAt']),
+    storedPaymentMethodId: stringOrNull(data['storedPaymentMethodId']),
+    refundedAmount: numberOrNull(data['refundedAmount']),
+  }
+}
+
+function toWebhookEndpoint(data: Record<string, unknown>): WebhookEndpoint {
+  const events = data['events']
+  // The list has no secret, and a created endpoint gets its own below: never pass one through.
+  const { secret: _secret, ...rest } = data
+  return {
+    ...rest,
+    id: stringOr(data['id'], ''),
+    url: stringOr(data['url'], ''),
+    events: Array.isArray(events) ? events.filter((event): event is string => typeof event === 'string') : [],
+    status: stringOr(data['status'], ''),
+    createdAt: stringOr(data['createdAt'], ''),
+  }
+}
+
+function normalizeWebhookId(webhookId: unknown): string {
+  // The API signs the id in lowercase hyphenated form.
+  const normalized = String(webhookId ?? '').trim().toLowerCase()
+  if (!UUID_PATTERN.test(normalized)) {
+    throw new TypeError('webhookId must be the endpoint id returned by createWebhookEndpoint() or listWebhookEndpoints()')
+  }
+  return normalized
+}
+
+function normalizeHandle(value: unknown, name: string, hint: string): string {
+  const normalized = String(value ?? '').trim()
+  if (!HANDLE_PATTERN.test(normalized)) {
+    throw new TypeError(`${name} must be ${hint}`)
+  }
+  return normalized
 }
 
 function normalizePaymentMethodId(paymentMethodId: unknown): string {
@@ -863,6 +1364,18 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === 'string' && value !== '' ? value : fallback
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' ? value : fallback
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' ? value : null
 }
 
 function describe(error: unknown): string {

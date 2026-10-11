@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
 import {
@@ -171,6 +172,15 @@ test('ping signs an empty idempotency key and an empty body against the canonica
     body: '',
   })
   assert.equal(init.headers['X-Signature'], expected)
+})
+
+test('the User-Agent names the package version', async () => {
+  const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, data: { pong: true } } })
+
+  await makeClient(fetchImpl).ping()
+
+  assert.ok(calls[0].init.headers['User-Agent'].startsWith(`dominaite-node/${version} (node `))
 })
 
 test('a ping against bad credentials is an AuthenticationError carrying the code', async () => {
@@ -620,7 +630,7 @@ test('orderReference must be a non-empty string', async () => {
 
 test('a 429 is a RateLimitError carrying an integer Retry-After', async () => {
   const fetchImpl = async () =>
-    new Response(JSON.stringify({ success: false, errorCode: 'RATE_LIMITED' }), {
+    new Response(JSON.stringify({ success: false, error: { code: 'RATE_LIMIT_EXCEEDED', statusCode: 429 } }), {
       status: 429,
       headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
     })
@@ -632,6 +642,7 @@ test('a 429 is a RateLimitError carrying an integer Retry-After', async () => {
       assert.ok(!(error instanceof TransportError), '429 must not look retryable')
       assert.ok(!(error instanceof ApiError))
       assert.equal(error.retryAfterSeconds, 30)
+      assert.equal(error.errorCode, 'RATE_LIMIT_EXCEEDED')
       assert.match(error.message, /retryAfterSeconds/)
       return true
     },
@@ -757,13 +768,15 @@ const CHARGE_PARAMS = {
 }
 
 // The wire form of a placed charge: success=true, the charge under data, and no
-// declineClass/declineCode keys at all (the gateway omits nulls).
+// declineClass/declineCode/agreementId keys at all (the gateway omits nulls). sequence is
+// an integer, so it is always there.
 const CHARGE = {
   chargeId: 'ch_33333333333343338333333333333333',
   status: 'succeeded',
   transactionId: '33333333-3333-4333-8333-333333333333',
+  sequence: 1,
 }
-const CHARGE_RESULT = { ...CHARGE, declineClass: null, declineCode: null }
+const CHARGE_RESULT = { ...CHARGE, declineClass: null, declineCode: null, agreementId: null }
 const placed = (charge = CHARGE) => ({ status: 201, body: { success: true, data: charge } })
 
 test('saveCard is sent in the session body and nowhere else', async () => {
@@ -899,6 +912,43 @@ test('chargePaymentMethod sends description in the body', async () => {
   })
 })
 
+test('chargePaymentMethod sends agreementId and any field it does not model, as given', async () => {
+  const { fetchImpl, calls } = recordingFetch(placed())
+  const extra = { agreementId: 'agr_0123456789abcdef0123456789abcdef', futureField: { kept: true } }
+  await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, { ...CHARGE_PARAMS, ...extra })
+
+  const { init } = calls[0]
+  const { idempotencyKey: _header, ...body } = { ...CHARGE_PARAMS, ...extra }
+  assert.equal(init.body, JSON.stringify(body))
+  assert.equal(init.headers['Idempotency-Key'], CHARGE_PARAMS.idempotencyKey)
+  assert.equal(
+    init.headers['X-Signature'],
+    signRequest({ ...CHARGE_VECTOR, timestamp: init.headers['X-Timestamp'], body: init.body }),
+  )
+})
+
+test('a charge under an agreement answers its agreementId and sequence', async () => {
+  const underAgreement = { ...CHARGE, agreementId: 'agr_0123456789abcdef0123456789abcdef', sequence: 4 }
+  const { fetchImpl } = recordingFetch(placed(underAgreement))
+
+  const charge = await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, {
+    ...CHARGE_PARAMS,
+    agreementId: underAgreement.agreementId,
+  })
+
+  assert.equal(charge.agreementId, underAgreement.agreementId)
+  assert.equal(charge.sequence, 4)
+})
+
+test('a charge from a gateway that sends no sequence reads it as 0', async () => {
+  const { sequence: _absent, ...older } = CHARGE
+  const { fetchImpl } = recordingFetch(placed(older))
+
+  const charge = await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS)
+  assert.equal(charge.sequence, 0)
+  assert.equal(charge.agreementId, null)
+})
+
 test('a 402 decline is a result with a decline class, not an exception', async () => {
   const declined = { ...CHARGE, status: 'failed', declineClass: 'soft_funds', declineCode: '51' }
   const { fetchImpl } = recordingFetch({
@@ -911,7 +961,7 @@ test('a 402 decline is a result with a decline class, not an exception', async (
   })
 
   const charge = await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS)
-  assert.deepEqual(charge, declined)
+  assert.deepEqual(charge, { ...declined, agreementId: null })
   assert.equal(charge.status, 'failed')
   assert.equal(charge.declineClass, 'soft_funds')
   assert.equal(charge.declineCode, '51')
@@ -925,7 +975,7 @@ test('a 200 durable replay of a placed charge is a result too', async () => {
 })
 
 test('a charge the gateway answers with a code is a ChargeError keeping code, status and data', async () => {
-  const unknown = { ...CHARGE, status: 'pending' }
+  const unknown = { ...CHARGE, status: 'pending', sequence: 0 }
   const { fetchImpl } = recordingFetch({
     status: 502,
     body: {
@@ -943,7 +993,7 @@ test('a charge the gateway answers with a code is a ChargeError keeping code, st
       assert.equal(error.httpStatus, 502)
       assert.equal(error.errorCode, 'CHARGE_OUTCOME_UNKNOWN')
       assert.equal(error.message, 'The payment provider gave no verdict.')
-      assert.deepEqual(error.charge, { ...unknown, declineClass: null, declineCode: null })
+      assert.deepEqual(error.charge, { ...unknown, declineClass: null, declineCode: null, agreementId: null })
       assert.equal(error.transactionId, CHARGE.transactionId)
       return true
     },
@@ -1145,18 +1195,23 @@ test('ErrorCodes names each code as itself and cannot be changed at runtime', ()
   }
   assert.deepEqual(Object.keys(ErrorCodes).sort(), [
     'ALREADY_PROCESSED',
+    'CHARGE_DECLINE_RATE_EXCEEDED',
+    'CHARGE_VELOCITY_EXCEEDED',
     'DUPLICATE_REQUEST',
     'IDEMPOTENCY_KEY_REUSED',
+    'INSUFFICIENT_SCOPE',
     'PAYMENT_NOT_FOUND',
     'PAYMENT_NOT_REFUNDABLE',
     'PAYMENT_PROCESSING_UNAVAILABLE',
     'PRIOR_ATTEMPT_FAILED',
+    'RATE_LIMIT_EXCEEDED',
     'REFUND_AMOUNT_EXCEEDED',
     'REFUND_FAILED',
     'REFUND_NOT_FOUND',
     'STOREFRONT_INACTIVE',
     'STOREFRONT_MISMATCH',
     'STOREFRONT_NOT_WHITELISTED',
+    'VERIFY_ONLY_NOT_ENABLED',
   ])
   assert.ok(Object.isFrozen(ErrorCodes))
   // The replay and availability constants are the refusal codes a session actually raises.
@@ -1246,4 +1301,25 @@ test('a clean replay after a lost response resolves with the ORIGINAL session', 
   assert.equal(session.cashierToken, CHECKOUT.cashierToken)
   assert.equal(calls[0].headers['Idempotency-Key'], calls[1].headers['Idempotency-Key'])
   assert.equal(calls[0].body, calls[1].body, 'a replay is only clean with the same body')
+})
+
+test('getIntegrationContract reads the public contract path and answers its data as given', async () => {
+  const wire = JSON.parse(readFileSync(new URL('./merchant-api-wire-contract.json', import.meta.url), 'utf8'))
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, data: wire, metadata: {} } })
+
+  const contract = await makeClient(fetchImpl).getIntegrationContract()
+
+  const { url, init } = calls[0]
+  assert.equal(url, BASE_URL + '/merchant-api/integration/contract')
+  assert.equal(init.method, 'GET')
+  assert.equal(init.body, undefined)
+  assert.equal(init.headers['Idempotency-Key'], undefined)
+  assert.deepEqual(contract, wire)
+  assert.equal(contract.version, wire.version)
+})
+
+test('getIntegrationContract rejects an answer without a contract body as an ApiError', async () => {
+  const { fetchImpl } = recordingFetch({ body: { success: true } })
+
+  await assert.rejects(() => makeClient(fetchImpl).getIntegrationContract(), ApiError)
 })

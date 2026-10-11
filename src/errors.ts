@@ -9,16 +9,27 @@ export class DominaiteError extends Error {
 }
 
 /**
- * The API rejected your credentials or signature. Not retryable - fix the key id,
- * secret, or server clock. Machine-readable code on `errorCode`:
- * INVALID_API_KEY, INVALID_SIGNATURE, TIMESTAMP_OUT_OF_RANGE, IP_NOT_ALLOWED.
+ * The API refused your credentials (HTTP 401) or your key's access (HTTP 403). Not
+ * retryable with the same request. The HTTP status is on `httpStatus`, the machine-readable
+ * code on `errorCode`:
+ * - 401 INVALID_API_KEY, INVALID_SIGNATURE, TIMESTAMP_OUT_OF_RANGE, IP_NOT_ALLOWED: fix the
+ *   key id, the secret, the server clock or the IP allowlist.
+ * - 403 INSUFFICIENT_SCOPE: the key signed correctly but does not hold the scope the route
+ *   needs (payments, webhooks:manage or transactions:read). A key's scopes are fixed when it
+ *   is issued, so use a key that holds the scope.
+ * - 403 VERIFY_ONLY_NOT_ENABLED: a verifyOnly session, and verify-only is not on for your
+ *   account. Nothing was created and the idempotency key is not burnt. We switch it on for
+ *   your account.
  */
 export class AuthenticationError extends DominaiteError {
   readonly errorCode: string
+  /** 401 for a credential problem, 403 for a key that may not call the route. */
+  readonly httpStatus: number
 
-  constructor(errorCode: string, message: string) {
+  constructor(errorCode: string, message: string, httpStatus = 401) {
     super(message)
     this.errorCode = errorCode
+    this.httpStatus = httpStatus
   }
 }
 
@@ -54,6 +65,16 @@ export const ErrorCodes = Object.freeze({
   REFUND_AMOUNT_EXCEEDED: 'REFUND_AMOUNT_EXCEEDED',
   /** A failed refund's failureCode; never an HTTP error. */
   REFUND_FAILED: 'REFUND_FAILED',
+  /** 403 on any route: the key does not hold the scope the route needs. An AuthenticationError. */
+  INSUFFICIENT_SCOPE: 'INSUFFICIENT_SCOPE',
+  /** 403 on a verifyOnly createCheckoutSession: verify-only is not on for your account. An AuthenticationError. */
+  VERIFY_ONLY_NOT_ENABLED: 'VERIFY_ONLY_NOT_ENABLED',
+  /** 429: too many requests for your key or your IP. A RateLimitError. */
+  RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
+  /** 429 on chargePaymentMethod: a charge volume limit. A RateLimitError; see error.result for the window. */
+  CHARGE_VELOCITY_EXCEEDED: 'CHARGE_VELOCITY_EXCEEDED',
+  /** 429 on chargePaymentMethod: too many declines, so the key's charge route is locked. A RateLimitError. */
+  CHARGE_DECLINE_RATE_EXCEEDED: 'CHARGE_DECLINE_RATE_EXCEEDED',
 } as const)
 
 /**
@@ -69,6 +90,16 @@ export const STOREFRONT_ERROR_CODES = [
 
 /** One of the storefront codes this SDK knows about. */
 export type StorefrontErrorCode = (typeof STOREFRONT_ERROR_CODES)[number]
+
+/**
+ * The codes of the contract's authorization group, in the contract's order: 403
+ * INSUFFICIENT_SCOPE, the key signed correctly but lacks the scope the route needs. It arrives
+ * as an {@link AuthenticationError} with httpStatus 403. Not retryable with the same key.
+ */
+export const AUTHORIZATION_ERROR_CODES = ['INSUFFICIENT_SCOPE'] as const
+
+/** One of the authorization codes this SDK knows about. */
+export type AuthorizationErrorCode = (typeof AUTHORIZATION_ERROR_CODES)[number]
 
 /**
  * The gateway understood the request but refused to open a checkout session.
@@ -146,16 +177,22 @@ export class CheckoutRefusedError extends DominaiteError {
  * `errorCode` carries the machine-readable code when the API sent one - notably the
  * validation codes above on a 400 (IDEMPOTENCY_KEY_REQUIRED). It is undefined when the
  * response had no code to give, so check before branching on it.
+ *
+ * `result` is the whole JSON envelope the API sent ({} when there was none to parse), for
+ * fields not modelled above, such as error.params.
  */
 export class ApiError extends DominaiteError {
   readonly httpStatus: number
   /** The API's machine-readable code, when it sent one. See {@link VALIDATION_ERROR_CODES}. */
   readonly errorCode?: string
+  /** The full envelope, for fields not modelled above. */
+  readonly result: Record<string, unknown>
 
-  constructor(httpStatus: number, message: string, errorCode?: string) {
+  constructor(httpStatus: number, message: string, errorCode?: string, result: Record<string, unknown> = {}) {
     super(message)
     this.httpStatus = httpStatus
     this.errorCode = errorCode
+    this.result = result
   }
 }
 
@@ -173,8 +210,13 @@ export class ApiError extends DominaiteError {
 export class StorefrontError extends ApiError {
   declare readonly errorCode: StorefrontErrorCode
 
-  constructor(httpStatus: number, errorCode: StorefrontErrorCode, message: string) {
-    super(httpStatus, message, errorCode)
+  constructor(
+    httpStatus: number,
+    errorCode: StorefrontErrorCode,
+    message: string,
+    result: Record<string, unknown> = {},
+  ) {
+    super(httpStatus, message, errorCode, result)
   }
 }
 
@@ -332,22 +374,26 @@ export class RefundError extends ApiError {
   declare readonly errorCode: string
   /** True for REFUND_NOT_FOUND and DUPLICATE_REQUEST: the same request can succeed later. */
   readonly retryable: boolean
-  /** The full envelope, for fields not modelled above. */
-  readonly result: Record<string, unknown>
 
   constructor(httpStatus: number, errorCode: string, message: string, result: Record<string, unknown> = {}) {
-    super(httpStatus, message, errorCode)
+    super(httpStatus, message, errorCode, result)
     this.retryable = RETRYABLE_REFUND_ERROR_CODES.has(errorCode)
-    this.result = result
   }
 }
 
 /**
- * HTTP 429: you sent more requests than your key or your IP is allowed.
+ * HTTP 429: a limit refused the request before anything happened. Branch on `errorCode`:
+ * - RATE_LIMIT_EXCEEDED: you sent more requests than your key or your IP is allowed.
+ *   Platform limits are 60 requests per minute per API key and 120 per minute per IP.
+ *   Both are enforced on a rolling window, so a burst that fits inside one minute still
+ *   counts against the next.
+ * - CHARGE_VELOCITY_EXCEEDED (chargePaymentMethod): a charge volume limit. The window and
+ *   the limit are at `result.error.params`. A charge that keeps hitting this is a pattern
+ *   to look into, not to retry around.
+ * - CHARGE_DECLINE_RATE_EXCEEDED (chargePaymentMethod): the key collected too many declined
+ *   charges, so its charge route is locked for a while. Your other routes keep working.
  *
- * Platform limits are 60 requests per minute per API key and 120 per minute per IP.
- * Both are enforced on a rolling window, so a burst that fits inside one minute still
- * counts against the next.
+ * `errorCode` is undefined when the API sent no code.
  *
  * This is NOT retried automatically. The SDK cannot know how long to wait without
  * making the burst worse, so it hands the decision back to you: sleep for
@@ -360,10 +406,21 @@ export class RefundError extends ApiError {
 export class RateLimitError extends DominaiteError {
   /** Seconds to wait before retrying, or null when the API did not give a usable value. */
   readonly retryAfterSeconds: number | null
+  /** The API's machine-readable code, when it sent one. */
+  readonly errorCode?: string
+  /** The full envelope, for fields not modelled above. */
+  readonly result: Record<string, unknown>
 
-  constructor(message: string, retryAfterSeconds: number | null = null) {
+  constructor(
+    message: string,
+    retryAfterSeconds: number | null = null,
+    errorCode?: string,
+    result: Record<string, unknown> = {},
+  ) {
     super(message)
     this.retryAfterSeconds = retryAfterSeconds
+    this.errorCode = errorCode
+    this.result = result
   }
 }
 

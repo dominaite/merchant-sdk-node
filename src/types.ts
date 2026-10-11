@@ -8,10 +8,33 @@ export interface CheckoutCustomer {
   phone?: string
 }
 
+/**
+ * The customer's acceptance of recurring terms, as you recorded it on your own page. Send
+ * all three fields together.
+ */
+export interface AgreementConsent {
+  /**
+   * Which wording the customer accepted. On createCheckoutSession it is a version of the
+   * PLATFORM consent text, one of the contract's recurring.consentTextVersions (for
+   * example 'recurring-2026-09'), never your own wording. On createAgreement it is your
+   * own label for your wording, 1 to 50 characters.
+   */
+  textVersion: string
+  /** When the customer accepted: ISO 8601 UTC, not in the future. */
+  acceptedAt: string
+  /** The customer's IPv4 or IPv6 address at acceptance. */
+  ip: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
+}
+
 /** Parameters for {@link DominaiteClient.createCheckoutSession}. */
 export interface CreateCheckoutSessionParams {
-  /** MINOR units - 2500 is 25.00 EUR. Integers only, never floats. */
-  amount: number
+  /**
+   * MINOR units - 2500 is 25.00 EUR. Integers only, never floats. Required and above 0,
+   * except with verifyOnly: then send 0 or leave it out.
+   */
+  amount?: number
   /** ISO 4217, e.g. 'EUR'. */
   currency: string
   /** Your own order id, <= 100 chars. Shows up in your dashboard. */
@@ -24,6 +47,13 @@ export interface CreateCheckoutSessionParams {
   theme?: 'light' | 'dark' | 'bright'
   description?: string
   /**
+   * The id (a UUID) of the storefront this payment belongs to. Leave it out and the
+   * gateway uses your default storefront. An id that is not one of your storefronts is
+   * refused with 404; a key bound to one storefront refuses a different id with
+   * STOREFRONT_MISMATCH.
+   */
+  locationId?: string
+  /**
    * Ask the gateway to keep the card on file once this payment is approved, so you can
    * charge it again later with {@link DominaiteClient.chargePaymentMethod}. The stored
    * method shows up on {@link CheckoutStatus.storedPaymentMethod} after the payment
@@ -31,6 +61,28 @@ export interface CreateCheckoutSessionParams {
    * reach you: you get an id, a brand and the last four digits.
    */
   saveCard?: boolean
+  /**
+   * Save the payer's card without a payment. The checkout places a small authorization,
+   * saves the card and releases the authorization; nobody is charged. Send amount 0 or
+   * leave it out. saveCard is implied, integration must be 'widget', and agreementId is
+   * refused. The status read then carries verifyOnly: true, and a storedPaymentMethod is
+   * what says the card is verified. Refused with 403 VERIFY_ONLY_NOT_ENABLED (an
+   * AuthenticationError) until verify-only is on for your account. We switch it on for
+   * your account.
+   */
+  verifyOnly?: boolean
+  /**
+   * The agr_ handle of a PENDING agreement from createAgreement(). It makes this the
+   * subscription session that takes the agreement's first payment, saves the card and
+   * activates the agreement. Amount and currency must be the agreement's own (on a plan
+   * with a trial only the currency is held). The card is always saved.
+   */
+  agreementId?: string
+  /**
+   * Only with agreementId: the customer's acceptance of the platform consent text.
+   * Required unless the agreement already carries consent that names a platform version.
+   */
+  consent?: AgreementConsent
   /**
    * How the payer enters the card. 'widget' (the default when omitted) is the hosted
    * cashier widget; 'fields' renders card fields in your own page with checkout.js.
@@ -75,6 +127,13 @@ export interface CheckoutSession {
    * 'widget'.
    */
   clientSecret?: string | null
+  /**
+   * True on a verify-only session: amount is then the platform's verification hold, released
+   * once the card is saved. Absent (null) on a payment session.
+   */
+  verifyOnly?: boolean | null
+  /** The agr_ handle of the agreement this session takes the first payment for. Absent (null) on a one-off checkout. */
+  agreementId?: string | null
   [key: string]: unknown
 }
 
@@ -172,8 +231,64 @@ export interface CheckoutStatus {
    * error. null for non-wallet payments. Do not branch payment handling on it.
    */
   walletType?: WalletType | (string & {}) | null
+  /**
+   * True on a verify-only session: a card check, not a payment. status stays the raw status
+   * (requires_capture, then cancelled once the hold is released); a non-null
+   * storedPaymentMethod is what says the card is verified. Absent (null) on every other
+   * session.
+   */
+  verifyOnly?: boolean | null
+  /**
+   * What to do with a failed payment: one of {@link DECLINE_CLASSES}, or a class the
+   * gateway added after this SDK released. Null while the payment is open and on every
+   * status other than failed. It can be null on a failed payment too, for example when
+   * nobody declined the payment. Never read null as hard; if you retry, retry as you would
+   * for soft_other.
+   */
+  declineClass?: DeclineClass | (string & {}) | null
+  /**
+   * True when you initiated this charge on a stored card (chargePaymentMethod or an
+   * agreement), false for a payer in a hosted checkout session.
+   */
+  isRecurring: boolean
+  /**
+   * The agreement this session took the first payment for, or the agreement a charge was
+   * made under. Pending until the approval activates it. Absent (null) on a one-off payment.
+   */
+  agreement?: CheckoutStatusAgreement | null
+  /**
+   * The data.sequence of the latest charge.* webhook event about this transaction, so you
+   * can order this read against those events. 0 on a checkout payment, which announces
+   * payment.* events only, and before the first charge.* event.
+   */
+  sequence: number
   [key: string]: unknown
 }
+
+/** The agreement on a status read: enough to know whether the subscription started. */
+export interface CheckoutStatusAgreement {
+  /** The agr_ handle. */
+  id: string
+  /** pending until the approval activates it. Treat a value you do not recognise as not active. */
+  status: AgreementStatus | (string & {})
+  /** When the next charge is due (ISO 8601 UTC). Null while pending and once the agreement ended. */
+  nextChargeAt?: string | null
+  [key: string]: unknown
+}
+
+/**
+ * Every status an agreement can report, in the gateway's own order.
+ *
+ * pending: created, nothing charged; the subscription session activates it. active: the
+ * first period is paid and the platform charges each period. past_due: a period's charge
+ * failed for good (pastDueReason says why); a new card that pays the period makes it active
+ * again. cancelled: ended by you, no further charges. completed: every period of a plan with
+ * a fixed periodCount was charged. failed: reserved, the platform does not set it today.
+ * Treat a value you do not recognise as not billing.
+ */
+export const AGREEMENT_STATUSES = ['pending', 'active', 'past_due', 'cancelled', 'completed', 'failed'] as const
+
+export type AgreementStatus = (typeof AGREEMENT_STATUSES)[number]
 
 /**
  * Every state a stored payment method can be in, in the gateway's own order.
@@ -235,18 +350,29 @@ export interface ChargePaymentMethodParams {
   currency: string
   /** Your own order id, <= 100 chars. Shows up in your dashboard. */
   orderReference: string
+  /** Stored on the payment, at most 500 characters. */
   description?: string
+  /**
+   * The agr_ handle of the agreement this charge is made under. The gateway then holds the
+   * charge to the agreement's terms: its payment method, its currency and its amount (at
+   * most maxAmountPerPeriod on a variable agreement). Leave it out for a charge outside an
+   * agreement.
+   */
+  agreementId?: string
   /**
    * Required. Derive it from what you are charging for (the order, the billing period),
    * never per attempt: retrying with the same key never charges the card twice.
    */
   idempotencyKey: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
 }
 
 /**
  * Every outcome a charge can report, in the gateway's own order.
  *
- * succeeded: the money moved. failed: it did not; on a 402 declineClass says why.
+ * succeeded: the money moved. failed: it did not; on a 402 declineClass says why, and it
+ * can be null.
  * pending: the provider has not answered yet, poll getStatus(transactionId). cancelled:
  * an authorization voided before capture, no money moved. Treat an unknown value as
  * still open.
@@ -277,12 +403,24 @@ export interface PaymentMethodCharge {
   chargeId: string
   /** succeeded, failed, pending or cancelled. Treat anything you do not recognise as still open. */
   status: ChargeStatus | string
-  /** Set on a 402 decline; null everywhere else (the SDK reads absent as null). */
+  /**
+   * The class of a 402 decline, and null on every other status. declineClass can be null,
+   * for example when nobody declined the payment. getStatus(transactionId) carries the
+   * latest class. Never read null as hard. The SDK reads absent as null.
+   */
   declineClass: DeclineClass | string | null
-  /** The raw decline code, for your logs; branch on declineClass instead. Null when declineClass is. */
+  /** On a decline, the provider's decline code, for your logs; branch on declineClass instead. Null otherwise. */
   declineCode: string | null
   /** The transaction the charge created; readable with {@link DominaiteClient.getStatus}. */
   transactionId: string
+  /** The agr_ handle of the agreement the charge was made under; null without one. */
+  agreementId: string | null
+  /**
+   * The charge's outcome counter: the data.sequence of its charge.succeeded or charge.failed
+   * webhook when the charge was decided at once, 0 while pending. A replay returns the first
+   * answer, so a later webhook can be higher; getStatus() carries the live value.
+   */
+  sequence: number
   [key: string]: unknown
 }
 
@@ -303,6 +441,8 @@ export interface CreateRefundParams {
    * for its key, so a new attempt needs a new key.
    */
   idempotencyKey: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
 }
 
 /**
@@ -340,6 +480,329 @@ export interface Refund {
   failureMessage: string | null
   /** ISO 8601 UTC, when the refund reached succeeded or failed; null before that. */
   completedAt: string | null
+  [key: string]: unknown
+}
+
+/** What {@link DominaiteClient.listRefunds} returns: one payment's refunds and its totals. */
+export interface RefundList {
+  /** The payment whose refunds these are. */
+  transactionId: string
+  /** ISO 4217 code of the payment and of every amount here. */
+  currency: string
+  /** MINOR units refunded so far, from every source: this API, the dashboard and the provider. */
+  refundedAmount: number
+  /** MINOR units a new refund could take right now. 0 when the payment cannot be refunded. */
+  refundableAmount: number
+  /**
+   * The refunds created through this API, newest first, each in the shape getRefund()
+   * returns. Refunds made in the dashboard count in the totals but are not listed.
+   */
+  refunds: Refund[]
+  [key: string]: unknown
+}
+
+/** The units a plan's billing interval is counted in, in the gateway's own order. */
+export const INTERVAL_UNITS = ['day', 'week', 'month', 'year'] as const
+
+export type IntervalUnit = (typeof INTERVAL_UNITS)[number]
+
+/**
+ * Every status a plan can have, in the gateway's own order. Only an active plan accepts new
+ * agreements; an archived plan keeps billing the agreements it already has.
+ */
+export const PLAN_STATUSES = ['active', 'archived'] as const
+
+export type PlanStatus = (typeof PLAN_STATUSES)[number]
+
+/** Parameters for {@link DominaiteClient.createPlan}. */
+export interface CreatePlanParams {
+  /** Display name, 1 to 100 characters. You can change it later with updatePlan(). */
+  name: string
+  /** The charge per period in MINOR units of currency: 2500 is 25.00 EUR. You cannot change it later. */
+  amount: number
+  /** ISO 4217 code, three upper-case letters. You cannot change it later. */
+  currency: string
+  /** day, week, month or year. You cannot change it later. */
+  intervalUnit: IntervalUnit | (string & {})
+  /**
+   * Units per billing period, 1 when left out: month with 3 bills every 3 months. The
+   * interval is at most one year.
+   */
+  intervalCount?: number
+  /** The number of periods after which each agreement completes. Leave it out to bill until cancelled. */
+  periodCount?: number
+  /** Days from activation to the first charge, 0 to 365. Leave it out or send 0 for no trial. */
+  trialDays?: number
+  /**
+   * Your page where the customer cancels: an absolute https URL of at most 2048 characters.
+   * The platform prints it on every receipt and decline notice it emails the customer.
+   */
+  cancelUrl?: string
+  /**
+   * Required. Derive it from YOUR plan, never per attempt: the same key with the same body
+   * answers the same plan, so a create whose answer you lost is safe to repeat.
+   */
+  idempotencyKey: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
+}
+
+/** Parameters for {@link DominaiteClient.updatePlan}. Send at least one field; a field you leave out stays as it is. */
+export interface UpdatePlanParams {
+  /** The new display name, 1 to 100 characters. */
+  name?: string
+  /** The new trial, 0 to 365 days (0 removes it). Only agreements created after the change get it. */
+  trialDays?: number
+  /** The new cancel page (absolute https URL). An empty string removes it. */
+  cancelUrl?: string
+  /** Optional: the API does not replay a plan update, so the SDK sends a key only when you give one. */
+  idempotencyKey?: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
+}
+
+/** A recurring price you sell, as the plan routes return it. */
+export interface Plan {
+  /** plan_ followed by 32 hex characters. Case-sensitive: store and send it exactly as returned. */
+  id: string
+  name: string
+  /** The charge per period in MINOR units of currency. */
+  amount: number
+  currency: string
+  intervalUnit: IntervalUnit | (string & {})
+  intervalCount: number
+  /** The fixed number of periods; null bills until cancelled. */
+  periodCount: number | null
+  trialDays: number
+  /** active or archived. Treat a value you do not recognise as not accepting agreements. */
+  status: PlanStatus | (string & {})
+  /** Your cancel page; null when you gave none. */
+  cancelUrl: string | null
+  /** ISO 8601 UTC. */
+  createdAt: string
+  /** ISO 8601 UTC; null while active. */
+  archivedAt: string | null
+  [key: string]: unknown
+}
+
+/** Parameters for {@link DominaiteClient.createAgreement}. */
+export interface CreateAgreementParams {
+  /** The plan_ id of one of your active plans. */
+  planId: string
+  /** Your own id for the customer, 1 to 100 characters, the same for every agreement of that customer. */
+  customerReference: string
+  /**
+   * The pm_ id of an active card this customer already saved, saved from a payment in the
+   * plan's currency. Leave it out to let the subscription session save a card. Needs consent.
+   */
+  storedPaymentMethodId?: string
+  /**
+   * The customer's acceptance, when you captured it on your own page. textVersion is your
+   * own label here. Required with storedPaymentMethodId and with maxAmountPerPeriod.
+   */
+  consent?: AgreementConsent
+  /**
+   * For a variable amount only (seat plus usage): the most one charge may be, in MINOR
+   * units, at least the plan's amount. Needs consent. Leave it out for a fixed agreement.
+   */
+  maxAmountPerPeriod?: number
+  /**
+   * Required. Derive it from YOUR subscription, never per attempt: the same key with the
+   * same body answers the same agreement.
+   */
+  idempotencyKey: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
+}
+
+/**
+ * Why an agreement is past_due, in the gateway's own order. card_expired and card_revoked:
+ * the customer can fix it with a new card. hard_decline and dunning_exhausted: the issuer
+ * declined. sca_required: the issuer wants the customer present. unprocessable: the charge
+ * could not be placed at all. Treat a value you do not recognise as needing a new card.
+ */
+export const PAST_DUE_REASONS = [
+  'card_expired',
+  'card_revoked',
+  'hard_decline',
+  'dunning_exhausted',
+  'sca_required',
+  'unprocessable',
+] as const
+
+export type PastDueReason = (typeof PAST_DUE_REASONS)[number]
+
+/** The consent recorded on an agreement: what was sent, plus the platform's own receipt. */
+export interface AgreementConsentRecord {
+  /** As it was sent, on createAgreement or on the subscription session. */
+  textVersion: string
+  /** ISO 8601 UTC, as it was sent. */
+  acceptedAt: string | null
+  /** The customer's address, as it was sent. */
+  ip: string
+  /** ISO 8601 UTC, when the consent reached the platform (server clock). */
+  receivedAt: string | null
+  /** The address of the server that sent the consent, not the customer's. Often null. */
+  receivedFromIp: string | null
+  [key: string]: unknown
+}
+
+/** A customer's subscription to a plan, as the agreement routes return it. */
+export interface Agreement {
+  /** agr_ followed by 32 hex characters. Case-sensitive: store and send it exactly as returned. */
+  id: string
+  /** The plan the agreement was created from. */
+  planId: string
+  customerReference: string
+  /** The pm_ id of the card on file; null until a card is saved. */
+  storedPaymentMethodId: string | null
+  /** Treat a value you do not recognise as not billing. */
+  status: AgreementStatus | (string & {})
+  /** The charge per period in MINOR units, copied from the plan when the agreement was created. */
+  amount: number
+  /** The most one charge may be on a variable agreement; null on a fixed one. */
+  maxAmountPerPeriod: number | null
+  currency: string
+  intervalUnit: IntervalUnit | (string & {})
+  intervalCount: number
+  /** null bills until cancelled. */
+  periodCount: number | null
+  trialDays: number
+  /** ISO 8601 UTC of the next charge; null while pending and once ended. */
+  nextChargeAt: string | null
+  /** Why the agreement is past_due; null in every other status. */
+  pastDueReason: PastDueReason | (string & {}) | null
+  /** ISO 8601 UTC, when it went past_due; null in every other status. */
+  pastDueAt: string | null
+  /** The recorded consent; null until captured. */
+  consent: AgreementConsentRecord | null
+  /** Starts at 1 and rises when the price changes for a future period. */
+  version: number
+  /** The agreement's change counter: equal to data.sequence of its latest agreement.* event, 0 before the first. */
+  sequence: number
+  /** ISO 8601 UTC. */
+  createdAt: string
+  /** ISO 8601 UTC; null while pending. */
+  activatedAt: string | null
+  /** ISO 8601 UTC; null unless cancelled. */
+  cancelledAt: string | null
+  [key: string]: unknown
+}
+
+/**
+ * Every status a webhook endpoint can have, in the gateway's own order. active: deliveries
+ * are sent. inactive: deliveries are paused, because the endpoint was switched off in the
+ * dashboard or after repeated failed deliveries. Treat a value you do not recognise as paused.
+ */
+export const WEBHOOK_ENDPOINT_STATUSES = ['active', 'inactive'] as const
+
+export type WebhookEndpointStatus = (typeof WEBHOOK_ENDPOINT_STATUSES)[number]
+
+/** Parameters for {@link DominaiteClient.createWebhookEndpoint}. */
+export interface CreateWebhookEndpointParams {
+  /** The HTTPS URL on a public host that receives the deliveries, at most 500 characters. */
+  url: string
+  /** The event types to deliver, 1 to 50 of them, for example 'payment.succeeded'. */
+  events: string[]
+  /**
+   * Required. Derive it from YOUR endpoint, never per attempt. Repeat a create that got no
+   * answer with the SAME key: the API then never keeps two endpoints for one key.
+   */
+  idempotencyKey: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
+}
+
+/** A webhook endpoint, as {@link DominaiteClient.listWebhookEndpoints} returns it. */
+export interface WebhookEndpoint {
+  /** The endpoint id (a UUID). deleteWebhookEndpoint() takes it. */
+  id: string
+  /** The URL as registered. */
+  url: string
+  /** The event types delivered to this endpoint. */
+  events: string[]
+  status: WebhookEndpointStatus | (string & {})
+  /** ISO 8601 UTC. */
+  createdAt: string
+  [key: string]: unknown
+}
+
+/** What {@link DominaiteClient.createWebhookEndpoint} returns: the endpoint and, once, its secret. */
+export interface CreatedWebhookEndpoint extends WebhookEndpoint {
+  /**
+   * The whsec_ signing secret for verifyWebhook(). Only the first answer carries it: a
+   * repeat with the same key answers the same endpoint with secret null. Store it at once.
+   * No route shows it again; to replace a lost secret, delete the endpoint and create a new one.
+   */
+  secret: string | null
+}
+
+/**
+ * How a listed payment was taken, in the gateway's own order. payment: the payer paid on the
+ * checkout. charge: a saved card was charged, by you or by the subscription schedule.
+ * verification: a verify-only session saved a card; it is not a purchase, so leave it out of
+ * revenue. Treat a value you do not recognise as not revenue until you have checked it.
+ */
+export const TRANSACTION_TYPES = ['payment', 'charge', 'verification'] as const
+
+export type TransactionType = (typeof TRANSACTION_TYPES)[number]
+
+/** Parameters for {@link DominaiteClient.listTransactions}. They go in the query string. */
+export interface ListTransactionsParams {
+  /** Window start, inclusive, on createdAt: ISO 8601 UTC (use the Z form) or a Date. */
+  from: string | Date
+  /** Window end, exclusive: later than from and at most 31 days after it. ISO 8601 UTC or a Date. */
+  to: string | Date
+  /** Only payments that are in this status now. */
+  status?: TransactionStatus | (string & {})
+  /** Items per page, 1 to 100. The API uses 50 when you leave it out. */
+  limit?: number
+  /** The nextCursor of the previous page, unchanged. Leave it out for the first page. */
+  cursor?: string
+  /** Any other query parameter the API accepts, sent as given. */
+  [key: string]: unknown
+}
+
+/** One payment on a {@link TransactionPage}. The fields have the same values as the status read. */
+export interface Transaction {
+  /** The payment id that the session or the charge returned. */
+  transactionId: string
+  /** Your own order id from createCheckoutSession(); null when you sent none. */
+  orderReference: string | null
+  type: TransactionType | (string & {})
+  /** The status now, the same value getStatus() answers. */
+  status: TransactionStatus | (string & {})
+  /** MINOR units of currency. */
+  amount: number
+  currency: string
+  /** ISO 8601 UTC. The window and the order use it. */
+  createdAt: string
+  /** ISO 8601 UTC, when the payment first succeeded; null when it never did and on older payments. */
+  completedAt: string | null
+  /** The pm_ id of the saved card a charge used; null on checkout payments. */
+  storedPaymentMethodId: string | null
+  /** MINOR units refunded so far; null when nothing was refunded. */
+  refundedAmount: number | null
+  [key: string]: unknown
+}
+
+/** What {@link DominaiteClient.listTransactions} returns: one page, oldest first. */
+export interface TransactionPage {
+  /** The payments of this page, by createdAt then transactionId. Empty when the window has none. */
+  items: Transaction[]
+  /** Send it back as cursor, with the same from, to and status, for the next page. Null on the last page. */
+  nextCursor: string | null
+  [key: string]: unknown
+}
+
+/**
+ * The public integration contract, as {@link DominaiteClient.getIntegrationContract} returns
+ * it: the API's own description of its routes, fields, statuses, error codes, webhook events
+ * and signing rules. Only version is modelled; read the rest by name.
+ */
+export interface IntegrationContract {
+  /** The contract's dated version, for example '2026-09-16'. */
+  version: string
   [key: string]: unknown
 }
 
@@ -454,6 +917,17 @@ export interface PaymentWebhookData {
    * whose event has no storedPaymentMethod, call getStatus() to pick the card up.
    */
   storedPaymentMethod?: StoredPaymentMethod | null
+  /**
+   * True on every verification.* event, false on payment.* events. Absent on deliveries
+   * from a gateway that predates it.
+   */
+  verifyOnly?: boolean
+  /**
+   * On a failed event (verification.failed, payment.failed): why the issuer declined, with
+   * the same values as {@link CheckoutStatus.declineClass}. declineClass can be null, for
+   * example when nobody declined the payment.
+   */
+  declineClass?: DeclineClass | (string & {}) | null
   [key: string]: unknown
 }
 
@@ -545,7 +1019,23 @@ export type ChargeWebhookEvent = WebhookEvent<
 >
 
 /**
+ * The events of a verify-only session, on the payment.* data with verifyOnly true. A
+ * verify-only session never sends payment.* events. verification.succeeded: the card is
+ * checked; data.storedPaymentMethod is the saved card, or null when you must read it with
+ * getStatus(). verification.failed: the issuer declined or the payer abandoned the
+ * checkout, and no card was saved.
+ */
+export type VerificationWebhookEvent = WebhookEvent<
+  'verification.succeeded' | 'verification.failed',
+  PaymentWebhookData
+>
+
+/**
  * Every event type this SDK version models; narrow on `type`. A type added to the gateway
  * later still parses, with the same envelope, so check `type` before trusting `data`.
  */
-export type DominaiteWebhookEvent = PaymentWebhookEvent | AgreementWebhookEvent | ChargeWebhookEvent
+export type DominaiteWebhookEvent =
+  | PaymentWebhookEvent
+  | AgreementWebhookEvent
+  | ChargeWebhookEvent
+  | VerificationWebhookEvent
