@@ -298,7 +298,8 @@ export interface ChargePaymentMethodParams {
 /**
  * Every outcome a charge can report, in the gateway's own order.
  *
- * succeeded: the money moved. failed: it did not; on a 402 declineClass says why.
+ * succeeded: the money moved. failed: it did not; on a 402 declineClass says why, when
+ * the gateway could classify the decline at once.
  * pending: the provider has not answered yet, poll getStatus(transactionId). cancelled:
  * an authorization voided before capture, no money moved. Treat an unknown value as
  * still open.
@@ -329,9 +330,14 @@ export interface PaymentMethodCharge {
   chargeId: string
   /** succeeded, failed, pending or cancelled. Treat anything you do not recognise as still open. */
   status: ChargeStatus | string
-  /** Set on a 402 decline; null everywhere else (the SDK reads absent as null). */
+  /**
+   * The class of a 402 decline. Null on every other status, and on a decline the charge
+   * answer cannot classify at once (only SCA declines are): getStatus(transactionId)
+   * carries the class once the provider settles it. Never read null as hard. The SDK
+   * reads absent as null.
+   */
   declineClass: DeclineClass | string | null
-  /** The raw decline code, for your logs; branch on declineClass instead. Null when declineClass is. */
+  /** On a decline, the provider's decline code, for your logs; branch on declineClass instead. Null otherwise. */
   declineCode: string | null
   /** The transaction the charge created; readable with {@link DominaiteClient.getStatus}. */
   transactionId: string

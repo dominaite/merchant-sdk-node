@@ -285,9 +285,11 @@ export class DominaiteClient {
    * gateway replays its first answer.
    *
    * A decline is not an exception: the gateway answers HTTP 402 and this resolves with a
-   * charge whose status is 'failed' plus a declineClass telling you whether to give up on
-   * the card (hard), wait (soft_funds, soft_other) or bring the customer back for a
-   * hosted session (soft_sca_required). 'pending' is not terminal - poll
+   * charge whose status is 'failed'. Its declineClass says whether to give up on the card
+   * (hard), wait (soft_funds, soft_other) or bring the customer back for a hosted session
+   * (soft_sca_required). It can be null: the charge answer classifies only SCA declines
+   * at once, and getStatus(charge.transactionId) carries the class once the provider
+   * settles it. Never read null as hard. 'pending' is not terminal - poll
    * getStatus(charge.transactionId).
    *
    * Throws ChargeError when the gateway answered with a code instead of a charge:

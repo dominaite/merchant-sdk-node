@@ -413,6 +413,8 @@ try {
       // soft_sca_required - the issuer wants the customer present: send them through a
       //                     hosted session with saveCard and charge the new method
       // soft_other        - transient, one retry later is reasonable
+      // null              - not classified yet: getStatus(charge.transactionId) carries
+      //                     the class later. Never read null as hard
       handleDecline(charge.declineClass, charge.declineCode)
       break
     case 'cancelled':
@@ -462,13 +464,15 @@ try {
 A charge is signed exactly like a session and carries an `Idempotency-Key`, so a retry after a
 timeout with the **same** key never charges the card twice: the gateway replays its first answer,
 HTTP status included. The HTTP status is the contract on this route: 201 (or 200 on a replay)
-resolves with the charge, 402 resolves with the charge too (`status: 'failed'` plus
-`declineClass`), and 409, 422, 502 and 503 throw `ChargeError` with `errorCode`, `httpStatus`,
+resolves with the charge, 402 resolves with the charge too (`status: 'failed'`, and a
+`declineClass` when the decline arrived with one), and 409, 422, 502 and 503 throw `ChargeError` with `errorCode`, `httpStatus`,
 the gateway's message and, when the gateway attached the charge row, `charge` and
 `transactionId`. Only authentication (401/403), an id that is not yours (404, `ApiError`),
 validation (400, `ApiError`), rate limiting (429) and network failures keep their generic
-errors. `declineClass` and `declineCode` are `null` unless the charge was declined; the gateway
-omits them on the wire and the SDK reads absent as null.
+errors. `declineClass` and `declineCode` are `null` unless the charge was declined. On a
+decline, `declineClass` can still be `null`: the charge answer classifies only SCA declines at
+once, and `getStatus()` carries the class once the provider settles it. Never read a null class
+as hard. The gateway omits null fields on the wire and the SDK reads absent as null.
 
 Revoking signs an empty key and an empty body, like `getStatus()`. A revoke that fails with
 `RevokeError` changed nothing: `MERCHANT_API_UNAVAILABLE` (503) is retryable,
