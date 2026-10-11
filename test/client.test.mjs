@@ -174,6 +174,15 @@ test('ping signs an empty idempotency key and an empty body against the canonica
   assert.equal(init.headers['X-Signature'], expected)
 })
 
+test('the User-Agent names the package version', async () => {
+  const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, data: { pong: true } } })
+
+  await makeClient(fetchImpl).ping()
+
+  assert.ok(calls[0].init.headers['User-Agent'].startsWith(`dominaite-node/${version} (node `))
+})
+
 test('a ping against bad credentials is an AuthenticationError carrying the code', async () => {
   const { fetchImpl } = recordingFetch({ status: 401, body: { errorCode: 'INVALID_SIGNATURE' } })
 
