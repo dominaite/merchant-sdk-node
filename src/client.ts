@@ -444,9 +444,7 @@ export class DominaiteClient {
       throw new TypeError('params must be an object carrying idempotencyKey')
     }
 
-    // Built field by field, not spread: the body is what gets signed, and a full refund
-    // is an absent amount, never a null one.
-    const bodyParams: Record<string, unknown> = {}
+    // A full refund is an absent amount, never a null one: null is refused here.
     if (params.amount !== undefined) {
       if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
         throw new TypeError(
@@ -454,16 +452,15 @@ export class DominaiteClient {
             'omit it to refund everything still refundable',
         )
       }
-      bodyParams['amount'] = params.amount
     }
-    if (params.reason !== undefined) {
-      if (typeof params.reason !== 'string') {
-        throw new TypeError('reason must be a string')
-      }
-      bodyParams['reason'] = params.reason
+    if (params.reason !== undefined && typeof params.reason !== 'string') {
+      throw new TypeError('reason must be a string')
     }
 
-    return { idempotencyKey: normalizeIdempotencyKey(params.idempotencyKey), body: encodeBody(bodyParams) }
+    // Every field goes out as given, so a field the gateway adds later needs no new SDK
+    // release. The key is a header, never a body field.
+    const { idempotencyKey: providedKey, ...bodyParams } = params
+    return { idempotencyKey: normalizeIdempotencyKey(providedKey), body: encodeBody(bodyParams) }
   }
 
   /** Sends and applies the generic failure rules: 5xx is transport, 4xx is ApiError. */

@@ -118,6 +118,30 @@ test('a full refund sends no amount key at all, not a null one', async () => {
   assert.equal(calls[0].init.headers['Idempotency-Key'], REFUND_KEY)
 })
 
+test('createRefund sends a field it does not model, as given, and signs it', async () => {
+  const { fetchImpl, calls } = recordingFetch({ success: true, data: QUEUED }, 202)
+
+  await makeClient(fetchImpl).createRefund(TRANSACTION_ID, {
+    amount: 1500,
+    futureField: 'kept',
+    amountForgotten: undefined,
+    idempotencyKey: REFUND_KEY,
+  })
+
+  const { init } = calls[0]
+  assert.equal(init.body, '{"amount":1500,"futureField":"kept"}')
+  assert.equal(
+    init.headers['X-Signature'],
+    expectedSignature({
+      timestamp: init.headers['X-Timestamp'],
+      method: 'POST',
+      path: `/merchant-api/payments/${TRANSACTION_ID}/refunds`,
+      idempotencyKey: REFUND_KEY,
+      body: init.body,
+    }),
+  )
+})
+
 test('createRefund resolves with the queued refund, absent fields read as null', async () => {
   const { fetchImpl } = recordingFetch({ success: true, data: QUEUED }, 202)
 

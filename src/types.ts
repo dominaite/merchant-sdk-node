@@ -371,6 +371,8 @@ export interface CreateRefundParams {
    * for its key, so a new attempt needs a new key.
    */
   idempotencyKey: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
 }
 
 /**
