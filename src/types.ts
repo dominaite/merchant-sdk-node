@@ -795,6 +795,17 @@ export interface TransactionPage {
   [key: string]: unknown
 }
 
+/**
+ * The public integration contract, as {@link DominaiteClient.getIntegrationContract} returns
+ * it: the API's own description of its routes, fields, statuses, error codes, webhook events
+ * and signing rules. Only version is modelled; read the rest by name.
+ */
+export interface IntegrationContract {
+  /** The contract's dated version, for example '2026-09-16'. */
+  version: string
+  [key: string]: unknown
+}
+
 /** What {@link DominaiteClient.ping} returns: proof your key, signing and clock are good. */
 export interface Ping {
   /** Always true on a 200. */

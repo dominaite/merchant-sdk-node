@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
 import {
@@ -1291,4 +1292,25 @@ test('a clean replay after a lost response resolves with the ORIGINAL session', 
   assert.equal(session.cashierToken, CHECKOUT.cashierToken)
   assert.equal(calls[0].headers['Idempotency-Key'], calls[1].headers['Idempotency-Key'])
   assert.equal(calls[0].body, calls[1].body, 'a replay is only clean with the same body')
+})
+
+test('getIntegrationContract reads the public contract path and answers its data as given', async () => {
+  const wire = JSON.parse(readFileSync(new URL('./merchant-api-wire-contract.json', import.meta.url), 'utf8'))
+  const { fetchImpl, calls } = recordingFetch({ body: { success: true, data: wire, metadata: {} } })
+
+  const contract = await makeClient(fetchImpl).getIntegrationContract()
+
+  const { url, init } = calls[0]
+  assert.equal(url, BASE_URL + '/merchant-api/integration/contract')
+  assert.equal(init.method, 'GET')
+  assert.equal(init.body, undefined)
+  assert.equal(init.headers['Idempotency-Key'], undefined)
+  assert.deepEqual(contract, wire)
+  assert.equal(contract.version, wire.version)
+})
+
+test('getIntegrationContract rejects an answer without a contract body as an ApiError', async () => {
+  const { fetchImpl } = recordingFetch({ body: { success: true } })
+
+  await assert.rejects(() => makeClient(fetchImpl).getIntegrationContract(), ApiError)
 })

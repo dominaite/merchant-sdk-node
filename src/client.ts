@@ -17,20 +17,21 @@ import {
 import { countCodePoints, MAX_FIELD_CODE_POINTS, normalizeIdempotencyKey } from './idempotency.js'
 import { signRequest } from './signing.js'
 import type {
+  Agreement,
   ChargePaymentMethodParams,
   CheckoutSession,
   CheckoutStatus,
-  CreateCheckoutSessionParams,
-  CreateRefundParams,
-  DominaiteClientOptions,
-  PaymentMethodCharge,
-  Ping,
-  Agreement,
   CreateAgreementParams,
+  CreateCheckoutSessionParams,
   CreatedWebhookEndpoint,
   CreatePlanParams,
+  CreateRefundParams,
   CreateWebhookEndpointParams,
+  DominaiteClientOptions,
+  IntegrationContract,
   ListTransactionsParams,
+  PaymentMethodCharge,
+  Ping,
   Plan,
   Refund,
   RefundList,
@@ -47,6 +48,7 @@ const SESSIONS_PATH = '/merchant-api/checkout/sessions'
 const PAYMENT_METHODS_PATH = '/merchant-api/payment-methods'
 const PAYMENTS_PATH = '/merchant-api/payments'
 const PING_PATH = '/merchant-api/ping'
+const INTEGRATION_CONTRACT_PATH = '/merchant-api/integration/contract'
 const PLANS_PATH = '/merchant-api/plans'
 const AGREEMENTS_PATH = '/merchant-api/agreements'
 const WEBHOOKS_PATH = '/merchant-api/webhooks'
@@ -158,6 +160,21 @@ export class DominaiteClient {
     // GET signs an EMPTY idempotency key and an EMPTY body.
     const response = await this.#request('GET', PING_PATH, null, '')
     return response as Ping
+  }
+
+  /**
+   * Reads the public integration contract: the API's own description of its routes,
+   * fields, statuses, error codes, webhook events and signing rules. Every key may read it.
+   * Use it to compare what your integration expects with the live API.
+   *
+   * Throws RateLimitError, ApiError or TransportError.
+   */
+  async getIntegrationContract(): Promise<IntegrationContract> {
+    // GET signs an EMPTY idempotency key and an EMPTY body. The route is public, so the API
+    // does not check the signature, but sending it costs nothing.
+    const reply = await this.#send('GET', INTEGRATION_CONTRACT_PATH, null, '')
+    const data = readObject(reply, 'contract')
+    return { ...data, version: stringOr(data['version'], '') }
   }
 
   /**

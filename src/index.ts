@@ -79,6 +79,7 @@ export type {
   DeclineClass,
   DominaiteClientOptions,
   DominaiteWebhookEvent,
+  IntegrationContract,
   IntervalUnit,
   ListTransactionsParams,
   PastDueReason,
