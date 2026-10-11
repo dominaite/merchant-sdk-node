@@ -689,6 +689,54 @@ export interface Agreement {
   [key: string]: unknown
 }
 
+/**
+ * Every status a webhook endpoint can have, in the gateway's own order. active: deliveries
+ * are sent. inactive: deliveries are paused, because the endpoint was switched off in the
+ * dashboard or after repeated failed deliveries. Treat a value you do not recognise as paused.
+ */
+export const WEBHOOK_ENDPOINT_STATUSES = ['active', 'inactive'] as const
+
+export type WebhookEndpointStatus = (typeof WEBHOOK_ENDPOINT_STATUSES)[number]
+
+/** Parameters for {@link DominaiteClient.createWebhookEndpoint}. */
+export interface CreateWebhookEndpointParams {
+  /** The HTTPS URL on a public host that receives the deliveries, at most 500 characters. */
+  url: string
+  /** The event types to deliver, 1 to 50 of them, for example 'payment.succeeded'. */
+  events: string[]
+  /**
+   * Required. Derive it from YOUR endpoint, never per attempt. Repeat a create that got no
+   * answer with the SAME key: the API then never keeps two endpoints for one key.
+   */
+  idempotencyKey: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
+}
+
+/** A webhook endpoint, as {@link DominaiteClient.listWebhookEndpoints} returns it. */
+export interface WebhookEndpoint {
+  /** The endpoint id (a UUID). deleteWebhookEndpoint() takes it. */
+  id: string
+  /** The URL as registered. */
+  url: string
+  /** The event types delivered to this endpoint. */
+  events: string[]
+  status: WebhookEndpointStatus | (string & {})
+  /** ISO 8601 UTC. */
+  createdAt: string
+  [key: string]: unknown
+}
+
+/** What {@link DominaiteClient.createWebhookEndpoint} returns: the endpoint and, once, its secret. */
+export interface CreatedWebhookEndpoint extends WebhookEndpoint {
+  /**
+   * The whsec_ signing secret for verifyWebhook(). Only the first answer carries it: a
+   * repeat with the same key answers the same endpoint with secret null. Store it at once.
+   * No route shows it again; to replace a lost secret, delete the endpoint and create a new one.
+   */
+  secret: string | null
+}
+
 /** What {@link DominaiteClient.ping} returns: proof your key, signing and clock are good. */
 export interface Ping {
   /** Always true on a 200. */

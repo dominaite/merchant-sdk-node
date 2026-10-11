@@ -27,13 +27,16 @@ import type {
   Ping,
   Agreement,
   CreateAgreementParams,
+  CreatedWebhookEndpoint,
   CreatePlanParams,
+  CreateWebhookEndpointParams,
   Plan,
   Refund,
   RefundList,
   RetryOptions,
   StoredPaymentMethod,
   UpdatePlanParams,
+  WebhookEndpoint,
 } from './types.js'
 
 const DEFAULT_BASE_URL = 'https://api.dominaite.com/payments'
@@ -43,6 +46,7 @@ const PAYMENTS_PATH = '/merchant-api/payments'
 const PING_PATH = '/merchant-api/ping'
 const PLANS_PATH = '/merchant-api/plans'
 const AGREEMENTS_PATH = '/merchant-api/agreements'
+const WEBHOOKS_PATH = '/merchant-api/webhooks'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
 const SDK_VERSION = '0.4.0'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -591,6 +595,65 @@ export class DominaiteClient {
     }
   }
 
+  /**
+   * Registers a webhook endpoint: the API delivers the events you name to url, signed with
+   * the endpoint's secret. Needs a key with the webhooks:manage scope.
+   *
+   * The answer carries the whsec_ secret ONCE. Store it at once: a repeat with the same
+   * idempotencyKey answers the same endpoint with secret null, and no other route shows
+   * it. A create that got no answer, a timeout or a 5xx may still have registered the
+   * endpoint, so repeat it with the SAME key: that replaces the unanswered endpoint and
+   * answers a fresh id and secret.
+   *
+   * Throws ApiError: WEBHOOK_URL_REJECTED (400) for a URL that is not HTTPS on a public
+   * host; WEBHOOK_LIMIT_REACHED (409) at 25 active endpoints; WEBHOOK_ALREADY_REGISTERED
+   * (409) when the key registered an endpoint more than a day ago that still exists (its
+   * id is at result.error.params.webhookId); DUPLICATE_REQUEST (409, retry with the same
+   * key); IDEMPOTENCY_KEY_REUSED (422); a validation code on a 400. Otherwise
+   * AuthenticationError (403 INSUFFICIENT_SCOPE without webhooks:manage), RateLimitError
+   * or TransportError.
+   */
+  async createWebhookEndpoint(params: CreateWebhookEndpointParams): Promise<CreatedWebhookEndpoint> {
+    const { idempotencyKey, body } = prepareKeyedBody(params)
+    const reply = await this.#send('POST', WEBHOOKS_PATH, body, idempotencyKey)
+    const data = readObject(reply, 'webhook endpoint')
+    return { ...toWebhookEndpoint(data), secret: stringOrNull(data['secret']) }
+  }
+
+  /**
+   * Lists your webhook endpoints, newest first, never with a secret: every active endpoint
+   * and the newest inactive ones. The route has no pages. Needs a key with the
+   * webhooks:manage scope.
+   *
+   * Throws AuthenticationError (403 INSUFFICIENT_SCOPE without webhooks:manage),
+   * RateLimitError, ApiError or TransportError.
+   */
+  async listWebhookEndpoints(): Promise<WebhookEndpoint[]> {
+    // GET signs an EMPTY idempotency key and an EMPTY body.
+    const reply = await this.#send('GET', WEBHOOKS_PATH, null, '')
+    return readArray(reply, 'webhook endpoint list').map(toWebhookEndpoint)
+  }
+
+  /**
+   * Deletes one of your webhook endpoints: it stops receiving deliveries at once. Resolves
+   * on HTTP 204. Needs a key with the webhooks:manage scope.
+   *
+   * A repeat answers 404: the endpoint is gone. So a delete retried after a lost answer
+   * rejects with WEBHOOK_NOT_FOUND; treat that as done.
+   *
+   * Throws ApiError WEBHOOK_NOT_FOUND (404) for an id that is unknown, not yours or already
+   * deleted. Otherwise AuthenticationError (403 INSUFFICIENT_SCOPE without
+   * webhooks:manage), RateLimitError or TransportError.
+   */
+  async deleteWebhookEndpoint(webhookId: string): Promise<void> {
+    const id = normalizeWebhookId(webhookId)
+    // DELETE signs an EMPTY idempotency key and an EMPTY body, like GET.
+    const reply = await this.#send('DELETE', `${WEBHOOKS_PATH}/${id}`, null, '')
+    if (reply.status >= 400) {
+      throw rejection(reply)
+    }
+  }
+
   #prepareSessionRequest(params: CreateCheckoutSessionParams): { idempotencyKey: string; body: string } {
     validateMoneyParams(params, params?.verifyOnly === true)
     const { idempotencyKey: providedKey, ...bodyParams } = params
@@ -1026,6 +1089,29 @@ function toAgreement(data: Record<string, unknown>): Agreement {
     activatedAt: stringOrNull(data['activatedAt']),
     cancelledAt: stringOrNull(data['cancelledAt']),
   }
+}
+
+function toWebhookEndpoint(data: Record<string, unknown>): WebhookEndpoint {
+  const events = data['events']
+  // The list has no secret, and a created endpoint gets its own below: never pass one through.
+  const { secret: _secret, ...rest } = data
+  return {
+    ...rest,
+    id: stringOr(data['id'], ''),
+    url: stringOr(data['url'], ''),
+    events: Array.isArray(events) ? events.filter((event): event is string => typeof event === 'string') : [],
+    status: stringOr(data['status'], ''),
+    createdAt: stringOr(data['createdAt'], ''),
+  }
+}
+
+function normalizeWebhookId(webhookId: unknown): string {
+  // The API signs the id in lowercase hyphenated form.
+  const normalized = String(webhookId ?? '').trim().toLowerCase()
+  if (!UUID_PATTERN.test(normalized)) {
+    throw new TypeError('webhookId must be the endpoint id returned by createWebhookEndpoint() or listWebhookEndpoints()')
+  }
+  return normalized
 }
 
 function normalizeHandle(value: unknown, name: string, hint: string): string {

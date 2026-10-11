@@ -51,6 +51,7 @@ export {
   STORED_PAYMENT_METHOD_STATUSES,
   TRANSACTION_STATUSES,
   WALLET_TYPES,
+  WEBHOOK_ENDPOINT_STATUSES,
 } from './types.js'
 export type {
   Agreement,
@@ -70,8 +71,10 @@ export type {
   CheckoutStatusAgreement,
   CreateAgreementParams,
   CreateCheckoutSessionParams,
+  CreatedWebhookEndpoint,
   CreatePlanParams,
   CreateRefundParams,
+  CreateWebhookEndpointParams,
   DeclineClass,
   DominaiteClientOptions,
   DominaiteWebhookEvent,
@@ -94,5 +97,7 @@ export type {
   TransactionStatus,
   UpdatePlanParams,
   WalletType,
+  WebhookEndpoint,
+  WebhookEndpointStatus,
   WebhookEvent,
 } from './types.js'
