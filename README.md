@@ -10,25 +10,14 @@ CommonJS, and TypeScript types.
 
 ## Install
 
-The package name is `@dominaite/merchant-sdk` (scope and name verified free on npm, 2026-08-17;
-publishing needs the `dominaite` npm org created first). It is **not published yet** - until it
-is, install from a local checkout:
-
 ```bash
-npm install /path/to/dominaite-node-sdk
+npm install @dominaite/merchant-sdk
 ```
 
-or in `package.json`:
-
-```json
-{ "dependencies": { "@dominaite/merchant-sdk": "file:../dominaite-node-sdk" } }
-```
-
-If you cloned this repo directly, build it once before using it - `npm install` in your app runs
-`prepack` for you, but a plain in-place checkout does not:
+If you cloned this repo directly, build it once before using it. A plain checkout has no `dist/`:
 
 ```bash
-cd dominaite-node-sdk
+cd merchant-sdk-node
 npm install
 npm run build     # emits dist/esm, dist/cjs, dist/types
 npm test          # builds, then runs the suite (includes the offline signing vector)
@@ -75,7 +64,7 @@ Everything below is copy-paste. It assumes an empty directory and nothing instal
 mkdir my-checkout && cd my-checkout
 npm init -y
 npm pkg set type=module
-npm install /path/to/dominaite-node-sdk
+npm install @dominaite/merchant-sdk
 ```
 
 Set your credentials and the environment you are pointing at:
