@@ -287,12 +287,22 @@ export interface ChargePaymentMethodParams {
   currency: string
   /** Your own order id, <= 100 chars. Shows up in your dashboard. */
   orderReference: string
+  /** Stored on the payment, at most 500 characters. */
   description?: string
+  /**
+   * The agr_ handle of the agreement this charge is made under. The gateway then holds the
+   * charge to the agreement's terms: its payment method, its currency and its amount (at
+   * most maxAmountPerPeriod on a variable agreement). Leave it out for a charge outside an
+   * agreement.
+   */
+  agreementId?: string
   /**
    * Required. Derive it from what you are charging for (the order, the billing period),
    * never per attempt: retrying with the same key never charges the card twice.
    */
   idempotencyKey: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
 }
 
 /**

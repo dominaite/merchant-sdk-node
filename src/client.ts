@@ -284,6 +284,9 @@ export class DominaiteClient {
    * so retrying after a timeout WITH THE SAME KEY never charges the card twice; the
    * gateway replays its first answer.
    *
+   * Send agreementId to make the charge under an agreement from createAgreement(): the
+   * gateway holds it to the agreement's terms, and the charge carries the agreementId back.
+   *
    * A decline is not an exception: the gateway answers HTTP 402 and this resolves with a
    * charge whose status is 'failed'. Its declineClass says whether to give up on the card
    * (hard), wait (soft_funds, soft_other) or bring the customer back for a hosted session
@@ -430,18 +433,10 @@ export class DominaiteClient {
       throw new TypeError('description must be a string')
     }
 
-    // Built field by field, not spread: the body is what gets signed, and the contract
-    // for this route is exactly these fields in this order.
-    const bodyParams: Record<string, unknown> = {
-      amount: params.amount,
-      currency: params.currency,
-      orderReference: params.orderReference,
-    }
-    if (params.description !== undefined) {
-      bodyParams['description'] = params.description
-    }
-
-    return { idempotencyKey: normalizeIdempotencyKey(params.idempotencyKey), body: encodeBody(bodyParams) }
+    // Every field goes out as given, in the order given, so a field the gateway adds
+    // later needs no new SDK release. The key is a header, never a body field.
+    const { idempotencyKey: providedKey, ...bodyParams } = params
+    return { idempotencyKey: normalizeIdempotencyKey(providedKey), body: encodeBody(bodyParams) }
   }
 
   #prepareRefundRequest(params: CreateRefundParams): { idempotencyKey: string; body: string } {

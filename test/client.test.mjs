@@ -900,6 +900,21 @@ test('chargePaymentMethod sends description in the body', async () => {
   })
 })
 
+test('chargePaymentMethod sends agreementId and any field it does not model, as given', async () => {
+  const { fetchImpl, calls } = recordingFetch(placed())
+  const extra = { agreementId: 'agr_0123456789abcdef0123456789abcdef', futureField: { kept: true } }
+  await makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, { ...CHARGE_PARAMS, ...extra })
+
+  const { init } = calls[0]
+  const { idempotencyKey: _header, ...body } = { ...CHARGE_PARAMS, ...extra }
+  assert.equal(init.body, JSON.stringify(body))
+  assert.equal(init.headers['Idempotency-Key'], CHARGE_PARAMS.idempotencyKey)
+  assert.equal(
+    init.headers['X-Signature'],
+    signRequest({ ...CHARGE_VECTOR, timestamp: init.headers['X-Timestamp'], body: init.body }),
+  )
+})
+
 test('a 402 decline is a result with a decline class, not an exception', async () => {
   const declined = { ...CHARGE, status: 'failed', declineClass: 'soft_funds', declineCode: '51' }
   const { fetchImpl } = recordingFetch({
