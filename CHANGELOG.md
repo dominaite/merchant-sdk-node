@@ -1,9 +1,49 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 ### Added
 
+- Verify-only sessions: `verifyOnly: true` on `createCheckoutSession()` saves the payer's card with
+  no payment. Send `amount: 0` or leave the amount out; any other amount throws `TypeError` before
+  anything is sent. The API refuses the session with 403 `VERIFY_ONLY_NOT_ENABLED` until we switch
+  it on for your account. The session sends `verification.succeeded` or `verification.failed`
+  (`VerificationWebhookEvent`), never a `payment.*` event.
+- Subscription sessions: `CreateCheckoutSessionParams` models `agreementId` and `consent`
+  (`AgreementConsent`), and also `locationId`.
+- Subscriptions: `createPlan()`, `listPlans()`, `getPlan()`, `updatePlan()` (PATCH) and
+  `deletePlan()`, and `createAgreement()`, `getAgreement()` and `cancelAgreement()`.
+  `createPlan()` and `createAgreement()` need an idempotency key. `updatePlan()` sends one only
+  when you give one, because the API does not replay a plan update. `Plan`, `Agreement`,
+  `AgreementConsentRecord`, `CreatePlanParams`, `UpdatePlanParams`, `CreateAgreementParams`,
+  `PLAN_STATUSES`, `INTERVAL_UNITS`, `AGREEMENT_STATUSES` and `PAST_DUE_REASONS` are exported.
+- `listRefunds(transactionId)`: the refunds of one payment that you created through the API, and
+  the `refundedAmount` and `refundableAmount` totals (`RefundList`).
+- Webhook endpoints from your code, with a `webhooks:manage` key: `createWebhookEndpoint()`,
+  `listWebhookEndpoints()` and `deleteWebhookEndpoint()`. The create answers the `whsec_` secret
+  one time only; a repeat with the same key answers `secret: null`. `WebhookEndpoint`,
+  `CreatedWebhookEndpoint`, `CreateWebhookEndpointParams` and `WEBHOOK_ENDPOINT_STATUSES` are
+  exported.
+- `listTransactions({ from, to, status, limit, cursor })`, with a `transactions:read` key: one page
+  of your payments, oldest first, and the `nextCursor` of the next page. The SDK signs the path
+  without the query. `Transaction`, `TransactionPage`, `ListTransactionsParams` and
+  `TRANSACTION_TYPES` are exported.
+- `getIntegrationContract()`: the contract that the API publishes about itself. Only `version` is
+  modelled (`IntegrationContract`); the other fields come through as sent.
+- Response fields: `verifyOnly`, `declineClass`, `isRecurring`, `agreement`
+  (`CheckoutStatusAgreement`) and `sequence` on `CheckoutStatus`; `verifyOnly` and `agreementId`
+  on `CheckoutSession`; `agreementId` and `sequence` on `PaymentMethodCharge`; `verifyOnly` and
+  `declineClass` on `PaymentWebhookData`. Every status, class and reason stays a lenient string,
+  so a value the SDK does not know never throws.
+- `agreementId` on `ChargePaymentMethodParams`.
+- Errors: `AuthenticationError.httpStatus` (401 or 403). `RateLimitError.errorCode` and
+  `RateLimitError.result`. `ApiError.result`, and so `StorefrontError.result`: the whole JSON
+  answer, for example `error.params.webhookId` on 409 `WEBHOOK_ALREADY_REGISTERED`.
+- `ErrorCodes` gains `INSUFFICIENT_SCOPE`, `VERIFY_ONLY_NOT_ENABLED`, `RATE_LIMIT_EXCEEDED`,
+  `CHARGE_VELOCITY_EXCEEDED` and `CHARGE_DECLINE_RATE_EXCEEDED`. `AUTHORIZATION_ERROR_CODES` and
+  `AuthorizationErrorCode` list the 403 authorization group, pinned against the wire contract.
+- Contract fixture: the new status read, checkout session and charge fields, with examples. Wire
+  contract fixture: the authorization error group.
 - Wallet reporting: `paymentMethod` and `walletType` (both optional, nullable strings) on
   `CheckoutStatus`. `paymentMethod` is how the payer paid (`card`, `wallet`, `bank_transfer`,
   `sepa`), null while the payment is still open and on older transactions. `walletType` names the
@@ -13,6 +53,20 @@
   exported.
 - Contract fixture: `paymentMethod` and `walletType` in the status read fields and examples. Wire
   contract fixture and the drift check: the `wallets` section.
+
+### Changed
+
+- A 403 no longer tells you to check your key id, secret and server clock. That hint is for 401
+  only. 403 `INSUFFICIENT_SCOPE` repeats the API message that names the missing scope, and 403
+  `VERIFY_ONLY_NOT_ENABLED` says that verify-only is not on for your account.
+- `chargePaymentMethod()` and `createRefund()` send every field you give, not only the fields that
+  the SDK models, so a new API field needs no SDK release. The idempotency key stays a header,
+  and the amount and reason checks stay.
+- `PaymentMethodCharge.declineClass` can be null on a declined charge. The charge answer
+  classifies only SCA declines at once; `getStatus()` carries the class later. The docs no
+  longer promise a class on every decline.
+- The README installs from npm and documents key scopes, verify-only sessions, subscriptions,
+  the refund list, webhook endpoints, transactions and the integration contract.
 
 ## 0.4.0
 
