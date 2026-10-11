@@ -240,9 +240,10 @@ export interface CheckoutStatus {
   verifyOnly?: boolean | null
   /**
    * What to do with a failed payment: one of {@link DECLINE_CLASSES}, or a class the
-   * gateway added after this SDK released. Null while the payment is open, on every status
-   * other than failed, and on a failure that arrived without a classification. Never read
-   * null as hard; if you retry, retry as you would for soft_other.
+   * gateway added after this SDK released. Null while the payment is open and on every
+   * status other than failed. It can be null on a failed payment too, for example when
+   * nobody declined the payment. Never read null as hard; if you retry, retry as you would
+   * for soft_other.
    */
   declineClass?: DeclineClass | (string & {}) | null
   /**
@@ -370,8 +371,8 @@ export interface ChargePaymentMethodParams {
 /**
  * Every outcome a charge can report, in the gateway's own order.
  *
- * succeeded: the money moved. failed: it did not; on a 402 declineClass says why, when
- * the gateway could classify the decline at once.
+ * succeeded: the money moved. failed: it did not; on a 402 declineClass says why, and it
+ * can be null.
  * pending: the provider has not answered yet, poll getStatus(transactionId). cancelled:
  * an authorization voided before capture, no money moved. Treat an unknown value as
  * still open.
@@ -403,10 +404,9 @@ export interface PaymentMethodCharge {
   /** succeeded, failed, pending or cancelled. Treat anything you do not recognise as still open. */
   status: ChargeStatus | string
   /**
-   * The class of a 402 decline. Null on every other status, and on a decline the charge
-   * answer cannot classify at once (only SCA declines are): getStatus(transactionId)
-   * carries the class once the provider settles it. Never read null as hard. The SDK
-   * reads absent as null.
+   * The class of a 402 decline, and null on every other status. declineClass can be null,
+   * for example when nobody declined the payment. getStatus(transactionId) carries the
+   * latest class. Never read null as hard. The SDK reads absent as null.
    */
   declineClass: DeclineClass | string | null
   /** On a decline, the provider's decline code, for your logs; branch on declineClass instead. Null otherwise. */
@@ -923,8 +923,9 @@ export interface PaymentWebhookData {
    */
   verifyOnly?: boolean
   /**
-   * On verification.failed: why the issuer declined, with the same values as
-   * {@link CheckoutStatus.declineClass}. Null for an abandoned checkout and on payment.* events.
+   * On a failed event (verification.failed, payment.failed): why the issuer declined, with
+   * the same values as {@link CheckoutStatus.declineClass}. declineClass can be null, for
+   * example when nobody declined the payment.
    */
   declineClass?: DeclineClass | (string & {}) | null
   [key: string]: unknown

@@ -420,8 +420,8 @@ try {
       // soft_sca_required - the issuer wants the customer present: send them through a
       //                     hosted session with saveCard and charge the new method
       // soft_other        - transient, one retry later is reasonable
-      // null              - not classified yet: getStatus(charge.transactionId) carries
-      //                     the class later. Never read null as hard
+      // null              - no class: never read it as hard. getStatus(charge.transactionId)
+      //                     carries the latest class
       handleDecline(charge.declineClass, charge.declineCode)
       break
     case 'cancelled':
@@ -471,14 +471,13 @@ try {
 A charge is signed exactly like a session and carries an `Idempotency-Key`, so a retry after a
 timeout with the **same** key never charges the card twice: the gateway replays its first answer,
 HTTP status included. The HTTP status is the contract on this route: 201 (or 200 on a replay)
-resolves with the charge, 402 resolves with the charge too (`status: 'failed'`, and a
-`declineClass` when the decline arrived with one), and 409, 422, 502 and 503 throw `ChargeError` with `errorCode`, `httpStatus`,
-the gateway's message and, when the gateway attached the charge row, `charge` and
-`transactionId`. Only authentication (401/403), an id that is not yours (404, `ApiError`),
-validation (400, `ApiError`), rate limiting (429) and network failures keep their generic
-errors. `declineClass` and `declineCode` are `null` unless the charge was declined. On a
-decline, `declineClass` can still be `null`: the charge answer classifies only SCA declines at
-once, and `getStatus()` carries the class once the provider settles it. Never read a null class
+resolves with the charge, 402 resolves with the charge too (`status: 'failed'`, with `declineClass`
+and `declineCode`), and 409, 422, 502 and 503 throw `ChargeError` with `errorCode`, `httpStatus`,
+the gateway's message and, when the gateway attached the charge row, `charge` and `transactionId`.
+Only authentication (401/403), an id that is not yours (404, `ApiError`), validation (400,
+`ApiError`), rate limiting (429) and network failures keep their generic errors. `declineClass` and
+`declineCode` are `null` unless the charge was declined. `declineClass` can be null, for example
+when nobody declined the payment. `getStatus()` carries the latest class. Never read a null class
 as hard. The gateway omits null fields on the wire and the SDK reads absent as null.
 
 Revoking signs an empty key and an empty body, like `getStatus()`. A revoke that fails with
@@ -514,9 +513,9 @@ is `requires_capture`, then `cancelled` when the authorization is released. A no
 `storedPaymentMethod` tells you that the card is verified.
 
 A verify-only session sends `verification.succeeded` or `verification.failed`, never a `payment.*`
-event. On `verification.failed`, `data.declineClass` tells you why. It is `null` when the payer
-abandoned the checkout. In `listTransactions()` the session is a row with `type: 'verification'`,
-and it is not revenue.
+event. On `verification.failed`, `data.declineClass` tells you why. It can be `null`, for example
+when the payer abandoned the checkout. In `listTransactions()` the session is a row with `type:
+'verification'`, and it is not revenue.
 
 Verify-only sessions work only on an account where they are switched on. We switch it on for your
 account. Until then, the call throws `AuthenticationError` with `errorCode`
@@ -784,8 +783,8 @@ announced. The status read is the source of truth: on a `saveCard` payment whose
 
 The same data carries `verifyOnly` and `declineClass`. `verifyOnly` is `true` on the
 `verification.*` events of a verify-only session and `false` on `payment.*` events.
-On `verification.failed`, `declineClass` tells you why the issuer declined. It is `null` for an
-abandoned checkout and on `payment.*` events.
+On a failed event, `declineClass` tells you why the issuer declined. `declineClass` can be null,
+for example when nobody declined the payment.
 
 `apiVersion` is the dated version of the payload shapes. A new date means a breaking change to the
 envelope or a `data` shape; added fields keep the current date. A gateway that predates it does not
