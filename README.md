@@ -49,6 +49,24 @@ NTP - signatures older than 5 minutes are rejected with `TIMESTAMP_OUT_OF_RANGE`
 If the key has an IP allowlist, calls from anywhere else fail with `IP_NOT_ALLOWED`. The allowlist
 is managed on the same dashboard tab.
 
+### Key scopes
+
+Each key holds one or more scopes. A route answers only a key that holds its scope:
+
+| Scope | What the key can call |
+|---|---|
+| `payments` | Checkout sessions and status reads, stored-card charges and revokes, refunds, plans and agreements. |
+| `transactions:read` | `listTransactions()`. |
+| `webhooks:manage` | `createWebhookEndpoint()`, `listWebhookEndpoints()` and `deleteWebhookEndpoint()`. |
+
+A key holds `payments` alone, or one or both of the other two scopes. A key with
+`transactions:read` or `webhooks:manage` is a reporting key, and it is not bound to one storefront.
+A key issued without scopes holds `payments`. The scopes of a key are fixed when it is issued: to change them, issue a new key.
+Every key can call `ping()` and `getIntegrationContract()`.
+
+A call with a key that does not hold the scope throws `AuthenticationError` with `errorCode`
+`INSUFFICIENT_SCOPE` and `httpStatus` 403. Nothing was created. Use a key that holds the scope.
+
 ## Quickstart (zero to a signed session against dev)
 
 Everything below is copy-paste. It assumes an empty directory and nothing installed.
@@ -485,6 +503,110 @@ The platform can also retire a card on its own: `status: 'retired'`, with `retir
 A retired card is refused with `PAYMENT_METHOD_NOT_ACTIVE` too and never becomes active again,
 so ask the customer to save a card again. `retiredReason` is `null` on every other card.
 
+### Save a card without a payment
+
+Send `verifyOnly: true` to save a card with no payment. Send `amount: 0` or leave the amount out:
+the platform sets the amount of the check. Any other amount throws `TypeError` before anything is
+sent. The session always saves the card, so you do not need `saveCard`. It works only with the
+widget (`integration` left out or `'widget'`), and the API refuses it with an `agreementId`.
+
+```js
+const session = await client.createCheckoutSession({
+  verifyOnly: true,
+  currency: 'EUR',
+  orderReference: 'card-check-8817',
+  idempotencyKey: 'card-check-8817',
+})
+```
+
+The checkout places a small authorization to check the card. The platform releases it within
+about 15 minutes, and nobody is charged. The status read carries `verifyOnly: true`. Its `status`
+is `requires_capture`, then `cancelled` when the authorization is released. A non-null
+`storedPaymentMethod` tells you that the card is verified.
+
+A verify-only session sends `verification.succeeded` or `verification.failed`, never a `payment.*`
+event. On `verification.failed`, `data.declineClass` tells you why. It is `null` when the payer
+abandoned the checkout. In `listTransactions()` the session is a row with `type: 'verification'`,
+and it is not revenue.
+
+Verify-only sessions work only on an account where they are switched on. We switch it on for your
+account. Until then, the call throws `AuthenticationError` with `errorCode`
+`VERIFY_ONLY_NOT_ENABLED` and `httpStatus` 403. Nothing was created, and you can use the same
+idempotency key again.
+
+## Subscriptions
+
+A plan is a recurring price that you sell. An agreement subscribes one of your customers to a
+plan. The platform then charges the saved card each period.
+
+1. Create a plan once for each price with `createPlan()`.
+2. Create an agreement for the customer with `createAgreement()`. It starts `pending` and charges
+   nothing.
+3. Create a subscription session: `createCheckoutSession()` with the `agreementId` and the
+   customer's `consent`. The checkout takes the session payment and saves the card.
+4. When that payment is approved, the agreement goes `active`. The platform then charges each
+   period and sends the `agreement.*` and `charge.*` webhooks.
+
+```js
+const plan = await client.createPlan({
+  name: 'Pro monthly',
+  amount: 1999,                              // minor units, each period
+  currency: 'EUR',
+  intervalUnit: 'month',                     // day, week, month or year
+  intervalCount: 1,
+  idempotencyKey: 'plan-pro-monthly-1999-EUR',
+})
+
+const agreement = await client.createAgreement({
+  planId: plan.id,
+  customerReference: customerId,             // your own id for the customer
+  idempotencyKey: `subscription-${subscriptionId}`,
+})
+
+const session = await client.createCheckoutSession({
+  agreementId: agreement.id,
+  amount: agreement.amount,                  // the agreement's amount, exactly
+  currency: agreement.currency,
+  orderReference: `subscription-${subscriptionId}`,
+  idempotencyKey: `subscription-${subscriptionId}-first`,
+  consent: {
+    textVersion: 'recurring-2026-09',        // the platform consent text that your page showed
+    acceptedAt: new Date().toISOString(),
+    ip: customerIp,
+  },
+})
+```
+
+On the subscription session, `consent.textVersion` is the version of the platform consent text
+that your page showed: one of `recurring.consentTextVersions` in `getIntegrationContract()`. On
+`createAgreement()`, `consent.textVersion` is your own label for your own wording. Without a
+trial, the session amount is the agreement's amount. With a trial, you choose the session amount,
+and the first scheduled charge comes when the trial ends. When the session cannot start the
+subscription, it throws `CheckoutRefusedError`, for example with `SUBSCRIPTIONS_NOT_ENABLED` or
+`AGREEMENT_NOT_PENDING`.
+
+The amount, the currency and the interval of a plan never change. For a new price, create a new
+plan and archive the old one with `deletePlan()`. The existing agreements keep their own price.
+`updatePlan()` changes only `name`, `trialDays` and `cancelUrl`. It sends an `Idempotency-Key`
+only when you give one, because the API does not replay a plan update.
+
+`createPlan()` and `createAgreement()` need an idempotency key. The same key with the same body
+answers the same object again, so you can repeat a create that timed out. The same key with
+another body throws `ApiError` with `errorCode` `IDEMPOTENCY_KEY_REUSED` (422).
+
+`getAgreement()` answers the `status` (`AGREEMENT_STATUSES`) and `nextChargeAt`. On `past_due` it
+also answers `pastDueReason` (`PAST_DUE_REASONS`) and `pastDueAt`. For `card_expired` and
+`card_revoked`, ask the customer for a new card. The status read of a subscription session carries
+`isRecurring`, `agreement` (`id`, `status`, `nextChargeAt`) and `sequence`.
+
+`cancelAgreement()` stops all further charges. It does not reverse a charge that was already
+placed. Cancelling a cancelled agreement resolves again. A completed or failed agreement throws
+`ApiError` with `errorCode` `AGREEMENT_ENDED` and `httpStatus` 409.
+
+The plan and agreement methods throw `ApiError` with the API's `errorCode`, for example
+`PLAN_NOT_FOUND` (404), `PLAN_NOT_ACTIVE` (409) or `AGREEMENT_CONSENT_REQUIRED` (422). The full
+answer is on `error.result`.
+
 ## Refunds
 
 Refund a payment in full or in part with `createRefund()`. `transactionId` is the id the checkout
@@ -569,12 +691,27 @@ On `payment.refunded`, `data.transactionId` is the refund's own transaction id, 
 that refund's amount, and `data.originalTransactionId` is the payment it refunds. There is one
 event per completed refund, partial or full.
 
+### List the refunds of a payment
+
+`listRefunds(transactionId)` answers the refunds that you created through the API. Each refund has
+the shape that `getRefund()` answers. The pending refunds come first, then the processing ones,
+then the finished ones, newest first in each group. A new refund is in the list as soon as
+`getRefund()` stops answering `REFUND_NOT_FOUND`. A payment with no refunds answers an empty list.
+
+The answer also carries two totals. `refundedAmount` counts every refund of the payment, the
+refunds made in the dashboard included. `refundableAmount` is what a new refund can take now.
+
+```js
+const { refundableAmount, refunds } = await client.listRefunds(transactionId)
+```
+
 ## Webhooks
 
 Register an endpoint in the Dominaite dashboard, **Webhooks** tab: an HTTPS URL, the events you
 want, and a retry count. The signing secret (`whsec_...`) is shown **once** at creation - store it
 like your API secret. Regenerating it replaces the old one immediately. You can have up to 25
-active endpoints.
+active endpoints. You can also manage endpoints from your code: see
+[Manage endpoints with the API](#manage-endpoints-with-the-api).
 
 Events you can subscribe to: `payment.succeeded`, `payment.failed`, `payment.requires_capture`,
 `payment.cancelled`, `payment.abandoned`, `payment.refunded`, `payment.disputed`. `succeeded` is
@@ -584,6 +721,9 @@ webhooked - see the polling subsection below for those.
 Recurring billing adds `agreement.activated`, `agreement.past_due`, `agreement.cancelled`,
 `charge.succeeded`, `charge.failed` and `charge.retrying`, on the same envelope and the same retry
 ladder. See [Ordering agreement and charge events](#ordering-agreement-and-charge-events).
+
+Verify-only sessions send `verification.succeeded` and `verification.failed` in place of the
+`payment.*` events. See [Save a card without a payment](#save-a-card-without-a-payment).
 
 The body is flat JSON, with no `success` wrapper to branch on:
 
@@ -652,6 +792,11 @@ approval, and null or absent on every other event and whenever no card was saved
 null when a card **was** saved, because a card can be stored after the approval was already
 announced. The status read is the source of truth: on a `saveCard` payment whose event has no
 `storedPaymentMethod`, call `getStatus()` to pick the card up.
+
+The same data carries `verifyOnly` and `declineClass`. `verifyOnly` is `true` on the
+`verification.*` events of a verify-only session and `false` on `payment.*` events.
+On `verification.failed`, `declineClass` tells you why the issuer declined. It is `null` for an
+abandoned checkout and on `payment.*` events.
 
 `apiVersion` is the dated version of the payload shapes. A new date means a breaking change to the
 envelope or a `data` shape; added fields keep the current date. A gateway that predates it does not
@@ -816,6 +961,77 @@ Poll after the payer returns to you, or on your order timeout - not in a tight l
 is rate limited per key. The platform allows 60 requests a minute per API key and 120 a minute per
 IP; going over throws `RateLimitError`, which carries `retryAfterSeconds`.
 
+### Manage endpoints with the API
+
+A key with the `webhooks:manage` scope can manage your webhook endpoints from your code.
+
+```js
+const endpoint = await client.createWebhookEndpoint({
+  url: 'https://shop.example/webhooks/dominaite',
+  events: ['payment.succeeded', 'payment.refunded'],
+  idempotencyKey: 'webhook-endpoint-main',
+})
+await saveSecret(endpoint.secret) // whsec_..., shown once
+```
+
+The answer carries the signing secret one time only. Store it at once. A repeat with the same
+idempotency key answers the same endpoint with `secret: null`, and no other route shows the
+secret. If you lose the secret, delete the endpoint and create a new one.
+
+A create that got no answer can still have registered the endpoint. Repeat it with the same key.
+If the first create did not finish, the API replaces its endpoint and answers a new `id` and
+`secret`. If it did finish, you get the repeat answer with `secret: null`. When you use a key
+again more than a day later and its endpoint still exists, the call throws `ApiError` with
+`errorCode` `WEBHOOK_ALREADY_REGISTERED`. `error.result.error.params.webhookId` names that
+endpoint.
+
+`listWebhookEndpoints()` answers your endpoints newest first, without secrets.
+`deleteWebhookEndpoint(id)` stops the deliveries at once. A second delete of the same id throws
+`ApiError` with `errorCode` `WEBHOOK_NOT_FOUND` (404): treat that as done. Other refusals are
+`WEBHOOK_URL_REJECTED` (400, the URL is not HTTPS on a public host) and `WEBHOOK_LIMIT_REACHED`
+(409, you have 25 active endpoints).
+
+## Transactions
+
+`listTransactions()` lists your card-not-present payments, one page at a time, oldest first. It
+needs a key with the `transactions:read` scope. Refunds are not rows of their own: a refunded
+payment shows `refundedAmount` and its status.
+
+```js
+let cursor
+do {
+  const page = await client.listTransactions({
+    from: '2026-10-01T00:00:00Z',            // inclusive
+    to: '2026-10-08T00:00:00Z',              // exclusive, at most 31 days after from
+    cursor,
+  })
+  for (const row of page.items) {
+    // row.transactionId, row.type, row.status, row.amount, row.refundedAmount, ...
+  }
+  cursor = page.nextCursor ?? undefined
+} while (cursor)
+```
+
+The `type` of a row is `payment` (the payer paid on the checkout), `charge` (a saved card was
+charged) or `verification` (a verify-only session, not revenue). The `status` has the same values
+as `getStatus()`. You can also filter on `status` and set `limit` (1 to 100, 50 by default).
+`from` and `to` take an ISO 8601 UTC string or a `Date`. The SDK sends the parameters in the query
+string and signs the path only.
+
+A row shows the status at the time of the read. For a statement, end the window a few minutes in
+the past. Read the window again later to get status changes such as refunds.
+
+## Integration contract
+
+`getIntegrationContract()` answers the contract that the API publishes about itself: routes,
+fields, statuses, error codes, webhook events and signing rules. Every key can read it. The SDK
+models only `version`. Read the other fields by name.
+
+```js
+const contract = await client.getIntegrationContract()
+console.log(contract.version, contract.recurring.consentTextVersions)
+```
+
 ## Errors
 
 Everything thrown by the SDK extends `DominaiteError`.
@@ -825,10 +1041,10 @@ Everything thrown by the SDK extends `DominaiteError`.
 | `CheckoutRefusedError` | The API answered, `success: false`. `errorCode` carries the reason. | Branch on `errorCode`. Do not blind-retry. |
 | `StorefrontError` | 409 or 400 about the website the payment belongs to. `errorCode` is a storefront code, see below. Extends `ApiError`. | Fix the storefront setup. Retrying does not help. |
 | `RefundError` | A refund route refused with one of the refund codes. Extends `ApiError`; `retryable` says whether the same request can succeed later. | See [Refunds](#refunds). |
-| `AuthenticationError` | 401/403. `errorCode` is `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE`, or `IP_NOT_ALLOWED`. | Fix the key id, secret, server clock, or allowlist. Never retry-loop. |
-| `RateLimitError` | 429. You went over 60 requests/min for the key or 120/min for the IP. `retryAfterSeconds` carries `Retry-After` when it was a whole number of seconds, else `null`. | Wait `retryAfterSeconds` (or your own backoff), then send it again with the **same** idempotency key. The SDK does not retry this for you. |
+| `AuthenticationError` | 401 with `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE` or `IP_NOT_ALLOWED`. 403 with `INSUFFICIENT_SCOPE` (the key does not hold the route's scope) or `VERIFY_ONLY_NOT_ENABLED`. `httpStatus` tells 401 from 403. | On 401, fix the key id, secret, server clock or allowlist. On `INSUFFICIENT_SCOPE`, use a key that holds the scope. On `VERIFY_ONLY_NOT_ENABLED`, ask us to switch verify-only on. Never retry-loop. |
+| `RateLimitError` | 429. `errorCode` says which limit: `RATE_LIMIT_EXCEEDED` (over 60 requests/min for the key or 120/min for the IP), `CHARGE_VELOCITY_EXCEEDED` or `CHARGE_DECLINE_RATE_EXCEEDED` (stored-card charges). `retryAfterSeconds` carries `Retry-After` when it was a whole number of seconds, else `null`. `result` is the whole answer. | Wait `retryAfterSeconds` (or your own backoff), then send it again with the **same** idempotency key. The SDK does not retry this for you. |
 | `TransportError` | Network failure, timeout, 5xx (`MERCHANT_API_UNAVAILABLE`), or a response body over 10MB. | Retry with the **same** idempotency key, and expect a replay refusal if the first attempt did land. |
-| `ApiError` | Any other rejecting or unexpected response; `httpStatus` carries the code. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. |
+| `ApiError` | Any other rejecting or unexpected response. `httpStatus` carries the HTTP status, `errorCode` the API's code when it sent one, and `result` the whole answer. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. |
 | `ApiError` with a 3xx `httpStatus` | The host you called answered with a redirect. | The Dominaite API never redirects, so the SDK refuses to follow one: your signed headers would be handed to whatever `Location` names, and its answer would look authentic. Check `baseUrl` and any proxy in front of it. |
 | `TypeError` | Bad arguments (float amount, missing field or idempotency key, malformed key id). | Fix the call; nothing was sent. |
 
