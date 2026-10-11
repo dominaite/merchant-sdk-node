@@ -280,11 +280,11 @@ export interface CheckoutStatusAgreement {
  * Every status an agreement can report, in the gateway's own order.
  *
  * pending: created, nothing charged; the subscription session activates it. active: the
- * first period is paid and the platform charges each period. past_due: a period's charge
- * failed for good (pastDueReason says why); a new card that pays the period makes it active
- * again. cancelled: ended by you, no further charges. completed: every period of a plan with
- * a fixed periodCount was charged. failed: reserved, the platform does not set it today.
- * Treat a value you do not recognise as not billing.
+ * first period is paid. With scheduled charges on, the platform charges each period.
+ * past_due: a period's charge failed for good (pastDueReason says why); a new card that pays
+ * the period makes it active again. cancelled: ended by you, no further charges. completed:
+ * every period of a plan with a fixed periodCount was charged. failed: reserved, the platform
+ * does not set it today. Treat a value you do not recognise as not billing.
  */
 export const AGREEMENT_STATUSES = ['pending', 'active', 'past_due', 'cancelled', 'completed', 'failed'] as const
 

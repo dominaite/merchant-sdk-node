@@ -333,9 +333,11 @@ export class DominaiteClient {
    * CHARGE_OUTCOME_UNKNOWN (502, the charge MAY have happened - poll
    * error.charge.transactionId, never retry under a new key), CHARGE_FAILED (502, nothing
    * charged), PAYMENT_METHOD_NOT_ACTIVE or DUPLICATE_REQUEST (409), IDEMPOTENCY_KEY_REUSED
-   * (422), PAYMENT_METHOD_CHARGES_DISABLED or PAYMENT_PROCESSING_UNAVAILABLE (503, retry
-   * later with the same key). A storefront refusal is a StorefrontError, as on sessions.
-   * Otherwise AuthenticationError, RateLimitError, ApiError
+   * (422), PAYMENT_PROCESSING_UNAVAILABLE (503, retry later with the same key) or
+   * PAYMENT_METHOD_CHARGES_DISABLED (503). If we never switched stored-card charges on for
+   * your account, a retry on PAYMENT_METHOD_CHARGES_DISABLED does not help: ask us. If they
+   * are on, retry later with the same key. A storefront refusal is a StorefrontError, as on
+   * sessions. Otherwise AuthenticationError, RateLimitError, ApiError
    * (404 for an id that is not yours, 400 validation) or TransportError (network - safe
    * to retry with the same key).
    */
@@ -567,8 +569,9 @@ export class DominaiteClient {
   /**
    * Subscribes one of your customers to a plan. The agreement starts pending and charges
    * nothing: the subscription session (createCheckoutSession() with agreementId) takes the
-   * first payment, saves the card and activates it. Then the platform charges each period.
-   * The same idempotencyKey with the same body answers the same agreement again.
+   * first payment, saves the card and activates it. With scheduled charges on, the platform
+   * then charges each period. The same idempotencyKey with the same body answers the same
+   * agreement again.
    *
    * Throws ApiError: PLAN_NOT_FOUND or PAYMENT_METHOD_NOT_FOUND (404); PLAN_NOT_ACTIVE or
    * PAYMENT_METHOD_NOT_ACTIVE (409); AGREEMENT_CONSENT_REQUIRED, MAX_AMOUNT_BELOW_PLAN_AMOUNT,
