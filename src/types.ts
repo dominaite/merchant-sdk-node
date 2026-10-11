@@ -737,6 +737,64 @@ export interface CreatedWebhookEndpoint extends WebhookEndpoint {
   secret: string | null
 }
 
+/**
+ * How a listed payment was taken, in the gateway's own order. payment: the payer paid on the
+ * checkout. charge: a saved card was charged, by you or by the subscription schedule.
+ * verification: a verify-only session saved a card; it is not a purchase, so leave it out of
+ * revenue. Treat a value you do not recognise as not revenue until you have checked it.
+ */
+export const TRANSACTION_TYPES = ['payment', 'charge', 'verification'] as const
+
+export type TransactionType = (typeof TRANSACTION_TYPES)[number]
+
+/** Parameters for {@link DominaiteClient.listTransactions}. They go in the query string. */
+export interface ListTransactionsParams {
+  /** Window start, inclusive, on createdAt: ISO 8601 UTC (use the Z form) or a Date. */
+  from: string | Date
+  /** Window end, exclusive: later than from and at most 31 days after it. ISO 8601 UTC or a Date. */
+  to: string | Date
+  /** Only payments that are in this status now. */
+  status?: TransactionStatus | (string & {})
+  /** Items per page, 1 to 100. The API uses 50 when you leave it out. */
+  limit?: number
+  /** The nextCursor of the previous page, unchanged. Leave it out for the first page. */
+  cursor?: string
+  /** Any other query parameter the API accepts, sent as given. */
+  [key: string]: unknown
+}
+
+/** One payment on a {@link TransactionPage}. The fields have the same values as the status read. */
+export interface Transaction {
+  /** The payment id that the session or the charge returned. */
+  transactionId: string
+  /** Your own order id from createCheckoutSession(); null when you sent none. */
+  orderReference: string | null
+  type: TransactionType | (string & {})
+  /** The status now, the same value getStatus() answers. */
+  status: TransactionStatus | (string & {})
+  /** MINOR units of currency. */
+  amount: number
+  currency: string
+  /** ISO 8601 UTC. The window and the order use it. */
+  createdAt: string
+  /** ISO 8601 UTC, when the payment first succeeded; null when it never did and on older payments. */
+  completedAt: string | null
+  /** The pm_ id of the saved card a charge used; null on checkout payments. */
+  storedPaymentMethodId: string | null
+  /** MINOR units refunded so far; null when nothing was refunded. */
+  refundedAmount: number | null
+  [key: string]: unknown
+}
+
+/** What {@link DominaiteClient.listTransactions} returns: one page, oldest first. */
+export interface TransactionPage {
+  /** The payments of this page, by createdAt then transactionId. Empty when the window has none. */
+  items: Transaction[]
+  /** Send it back as cursor, with the same from, to and status, for the next page. Null on the last page. */
+  nextCursor: string | null
+  [key: string]: unknown
+}
+
 /** What {@link DominaiteClient.ping} returns: proof your key, signing and clock are good. */
 export interface Ping {
   /** Always true on a 200. */

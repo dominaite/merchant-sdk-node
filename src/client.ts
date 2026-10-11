@@ -30,11 +30,14 @@ import type {
   CreatedWebhookEndpoint,
   CreatePlanParams,
   CreateWebhookEndpointParams,
+  ListTransactionsParams,
   Plan,
   Refund,
   RefundList,
   RetryOptions,
   StoredPaymentMethod,
+  Transaction,
+  TransactionPage,
   UpdatePlanParams,
   WebhookEndpoint,
 } from './types.js'
@@ -47,6 +50,7 @@ const PING_PATH = '/merchant-api/ping'
 const PLANS_PATH = '/merchant-api/plans'
 const AGREEMENTS_PATH = '/merchant-api/agreements'
 const WEBHOOKS_PATH = '/merchant-api/webhooks'
+const TRANSACTIONS_PATH = '/merchant-api/transactions'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
 const SDK_VERSION = '0.4.0'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -654,6 +658,41 @@ export class DominaiteClient {
     }
   }
 
+  /**
+   * Lists your card-not-present payments created in a window, one page at a time, oldest
+   * first: checkout payments, saved-card and subscription charges, and verify-only
+   * sessions. Refunds are not rows of their own: they show on their payment as
+   * refundedAmount and status. Needs a key with the transactions:read scope.
+   *
+   * Page through a window like this:
+   *
+   *   let cursor: string | undefined
+   *   do {
+   *     const page = await client.listTransactions({ from, to, cursor })
+   *     for (const transaction of page.items) { ... }
+   *     cursor = page.nextCursor ?? undefined
+   *   } while (cursor)
+   *
+   * The window is from (inclusive) to to (exclusive), at most 31 days. The parameters go
+   * in the query string, which is not signed: the SDK signs the path only.
+   *
+   * Throws ApiError with a validation code on a 400 (window, status, limit or cursor).
+   * Otherwise AuthenticationError (403 INSUFFICIENT_SCOPE without transactions:read),
+   * RateLimitError or TransportError.
+   */
+  async listTransactions(params: ListTransactionsParams): Promise<TransactionPage> {
+    const query = transactionQuery(params)
+    // GET signs the path WITHOUT the query string, an EMPTY idempotency key and an EMPTY body.
+    const reply = await this.#send('GET', TRANSACTIONS_PATH, null, '', query)
+    const data = readObject(reply, 'transaction page')
+    const items = data['items']
+    return {
+      ...data,
+      items: Array.isArray(items) ? items.filter(isPlainObject).map(toTransaction) : [],
+      nextCursor: stringOrNull(data['nextCursor']),
+    }
+  }
+
   #prepareSessionRequest(params: CreateCheckoutSessionParams): { idempotencyKey: string; body: string } {
     validateMoneyParams(params, params?.verifyOnly === true)
     const { idempotencyKey: providedKey, ...bodyParams } = params
@@ -721,6 +760,7 @@ export class DominaiteClient {
     path: string,
     body: string | null,
     idempotencyKey: string,
+    query = '',
   ): Promise<Reply> {
     const json = body ?? ''
     const timestamp = Math.floor(Date.now() / 1000).toString()
@@ -747,7 +787,8 @@ export class DominaiteClient {
 
     let response: Response
     try {
-      response = await this.#fetch(this.#baseUrl + path, {
+      // The query string goes on the URL only: the signature covers the path alone.
+      response = await this.#fetch(this.#baseUrl + path + query, {
         method,
         headers,
         // Never follow a redirect: the hop would carry the signed headers to whatever
@@ -1088,6 +1129,49 @@ function toAgreement(data: Record<string, unknown>): Agreement {
     createdAt: stringOr(data['createdAt'], ''),
     activatedAt: stringOrNull(data['activatedAt']),
     cancelledAt: stringOrNull(data['cancelledAt']),
+  }
+}
+
+/** The query string of a transaction list: '?from=...&to=...', every given parameter as given. */
+function transactionQuery(params: ListTransactionsParams): string {
+  if (!isPlainObject(params)) {
+    throw new TypeError('params must be an object with from and to')
+  }
+  const search = new URLSearchParams()
+  for (const [name, value] of Object.entries(params)) {
+    if (value === undefined || value === null) {
+      continue
+    }
+    if (value instanceof Date) {
+      if (Number.isNaN(value.getTime())) {
+        throw new TypeError(`${name} must be a valid Date`)
+      }
+      search.append(name, value.toISOString())
+      continue
+    }
+    search.append(name, String(value))
+  }
+  for (const name of ['from', 'to']) {
+    if ((search.get(name) ?? '') === '') {
+      throw new TypeError(`${name} is required: an ISO 8601 UTC instant or a Date`)
+    }
+  }
+  return `?${search.toString()}`
+}
+
+function toTransaction(data: Record<string, unknown>): Transaction {
+  return {
+    ...data,
+    transactionId: stringOr(data['transactionId'], ''),
+    orderReference: stringOrNull(data['orderReference']),
+    type: stringOr(data['type'], ''),
+    status: stringOr(data['status'], ''),
+    amount: numberOr(data['amount'], 0),
+    currency: stringOr(data['currency'], ''),
+    createdAt: stringOr(data['createdAt'], ''),
+    completedAt: stringOrNull(data['completedAt']),
+    storedPaymentMethodId: stringOrNull(data['storedPaymentMethodId']),
+    refundedAmount: numberOrNull(data['refundedAmount']),
   }
 }
 
