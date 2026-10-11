@@ -639,9 +639,9 @@ function rejection(reply: Reply): DominaiteError {
   const errorCode = stringOr(reply.payload['errorCode'], stringOr(reply.error['code'], ''))
   const message = stringOr(reply.payload['errorMessage'], stringOr(reply.error['message'], 'Request rejected'))
   if (isStorefrontErrorCode(errorCode)) {
-    return new StorefrontError(reply.status, errorCode, message)
+    return new StorefrontError(reply.status, errorCode, message, reply.envelope)
   }
-  return new ApiError(reply.status, message, errorCode === '' ? undefined : errorCode)
+  return new ApiError(reply.status, message, errorCode === '' ? undefined : errorCode, reply.envelope)
 }
 
 /**

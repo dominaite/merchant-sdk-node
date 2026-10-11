@@ -193,3 +193,33 @@ test('a 429 without a code leaves errorCode undefined', async () => {
     },
   )
 })
+
+test('an ApiError keeps the whole envelope on result, params included', async () => {
+  const body = failure('SOME_FUTURE_CONFLICT', 'Already there', 409, { existingId: 'x_1' })
+  const fetchImpl = respondWith(409, body)
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    (error) => {
+      assert.ok(error instanceof ApiError)
+      assert.equal(error.httpStatus, 409)
+      assert.equal(error.errorCode, 'SOME_FUTURE_CONFLICT')
+      assert.deepEqual(error.result, body)
+      assert.equal(error.result.error.params.existingId, 'x_1')
+      return true
+    },
+  )
+})
+
+test('an ApiError without a parsable body has an empty result', async () => {
+  const fetchImpl = async () => new Response('<html>bad gateway</html>', { status: 404 })
+
+  await assert.rejects(
+    () => makeClient(fetchImpl).ping(),
+    (error) => {
+      assert.ok(error instanceof ApiError)
+      assert.deepEqual(error.result, {})
+      return true
+    },
+  )
+})

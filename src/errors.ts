@@ -177,16 +177,22 @@ export class CheckoutRefusedError extends DominaiteError {
  * `errorCode` carries the machine-readable code when the API sent one - notably the
  * validation codes above on a 400 (IDEMPOTENCY_KEY_REQUIRED). It is undefined when the
  * response had no code to give, so check before branching on it.
+ *
+ * `result` is the whole JSON envelope the API sent ({} when there was none to parse), for
+ * fields not modelled above, such as error.params.
  */
 export class ApiError extends DominaiteError {
   readonly httpStatus: number
   /** The API's machine-readable code, when it sent one. See {@link VALIDATION_ERROR_CODES}. */
   readonly errorCode?: string
+  /** The full envelope, for fields not modelled above. */
+  readonly result: Record<string, unknown>
 
-  constructor(httpStatus: number, message: string, errorCode?: string) {
+  constructor(httpStatus: number, message: string, errorCode?: string, result: Record<string, unknown> = {}) {
     super(message)
     this.httpStatus = httpStatus
     this.errorCode = errorCode
+    this.result = result
   }
 }
 
@@ -204,8 +210,13 @@ export class ApiError extends DominaiteError {
 export class StorefrontError extends ApiError {
   declare readonly errorCode: StorefrontErrorCode
 
-  constructor(httpStatus: number, errorCode: StorefrontErrorCode, message: string) {
-    super(httpStatus, message, errorCode)
+  constructor(
+    httpStatus: number,
+    errorCode: StorefrontErrorCode,
+    message: string,
+    result: Record<string, unknown> = {},
+  ) {
+    super(httpStatus, message, errorCode, result)
   }
 }
 
@@ -363,13 +374,10 @@ export class RefundError extends ApiError {
   declare readonly errorCode: string
   /** True for REFUND_NOT_FOUND and DUPLICATE_REQUEST: the same request can succeed later. */
   readonly retryable: boolean
-  /** The full envelope, for fields not modelled above. */
-  readonly result: Record<string, unknown>
 
   constructor(httpStatus: number, errorCode: string, message: string, result: Record<string, unknown> = {}) {
-    super(httpStatus, message, errorCode)
+    super(httpStatus, message, errorCode, result)
     this.retryable = RETRYABLE_REFUND_ERROR_CODES.has(errorCode)
-    this.result = result
   }
 }
 
