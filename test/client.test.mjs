@@ -1162,6 +1162,7 @@ test('ErrorCodes names each code as itself and cannot be changed at runtime', ()
     'STOREFRONT_INACTIVE',
     'STOREFRONT_MISMATCH',
     'STOREFRONT_NOT_WHITELISTED',
+    'VERIFY_ONLY_NOT_ENABLED',
   ])
   assert.ok(Object.isFrozen(ErrorCodes))
   // The replay and availability constants are the refusal codes a session actually raises.

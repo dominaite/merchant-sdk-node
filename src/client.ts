@@ -149,8 +149,14 @@ export class DominaiteClient {
    * reload or a retry replays the same session instead of opening a second payment. A
    * missing or empty key throws TypeError before anything is sent.
    *
+   * With verifyOnly: true the session saves the payer's card without a payment: send
+   * amount 0 or leave it out. Every other session needs an amount above 0; anything else
+   * throws TypeError before anything is sent.
+   *
    * Throws AuthenticationError (wrong credentials, bad signature, clock off, IP not
-   * allowlisted - fix config, do not retry), CheckoutRefusedError (the gateway refused;
+   * allowlisted - fix config, do not retry; 403 INSUFFICIENT_SCOPE for a key without the
+   * payments scope; 403 VERIFY_ONLY_NOT_ENABLED for verifyOnly on an account without it),
+   * CheckoutRefusedError (the gateway refused;
    * inspect errorCode), StorefrontError (the website this session belongs to is not
    * whitelisted, inactive or not the key's own - fix the storefront, do not retry),
    * RateLimitError (429 - wait out retryAfterSeconds, then retry with the same key),
@@ -411,7 +417,7 @@ export class DominaiteClient {
   }
 
   #prepareSessionRequest(params: CreateCheckoutSessionParams): { idempotencyKey: string; body: string } {
-    validateMoneyParams(params)
+    validateMoneyParams(params, params?.verifyOnly === true)
     const { idempotencyKey: providedKey, ...bodyParams } = params
     return { idempotencyKey: normalizeIdempotencyKey(providedKey), body: encodeBody(bodyParams) }
   }
@@ -613,7 +619,16 @@ function accessDeniedMessage(httpStatus: number, errorCode: string, apiMessage: 
   if (errorCode === 'INSUFFICIENT_SCOPE') {
     // The API's own message names the scope the route needs.
     const scope = apiMessage === '' ? 'This API key does not have the scope this route requires' : apiMessage
-    return `${scope.replace(/\.+$/, '')}. A key's scopes are fixed when it is issued: use a key that holds this scope.`
+    return (
+      `${scope.replace(/\.+$/, '')}. ` +
+      "A key's scopes are fixed when it is issued: use a key that holds this scope."
+    )
+  }
+  if (errorCode === 'VERIFY_ONLY_NOT_ENABLED') {
+    return (
+      'Verify-only sessions are not enabled for your account. Nothing was created. ' +
+      'We switch it on for your account: contact Dominaite support.'
+    )
   }
   return `Access denied (HTTP 403 ${errorCode}): this API key may not call this route.`
 }
@@ -721,13 +736,24 @@ function toStoredPaymentMethod(data: Record<string, unknown>): StoredPaymentMeth
 }
 
 /** The checks shared by every request that moves money: amount, currency, orderReference. */
-function validateMoneyParams(params: { amount: number; currency: string; orderReference: string }): void {
-  for (const required of ['amount', 'currency', 'orderReference'] as const) {
+function validateMoneyParams(
+  params: { amount?: number; currency: string; orderReference: string },
+  verifyOnly = false,
+): void {
+  const requiredFields = verifyOnly
+    ? (['currency', 'orderReference'] as const)
+    : (['amount', 'currency', 'orderReference'] as const)
+  for (const required of requiredFields) {
     if (params?.[required] === undefined || params[required] === null) {
       throw new TypeError(`Missing required parameter: ${required}`)
     }
   }
-  if (!Number.isSafeInteger(params.amount) || params.amount <= 0) {
+  if (verifyOnly) {
+    // The platform sets the verification amount, so the gateway takes 0 or nothing.
+    if (params.amount !== undefined && params.amount !== 0) {
+      throw new TypeError('amount must be 0 or left out with verifyOnly: the platform sets the verification amount')
+    }
+  } else if (!Number.isSafeInteger(params.amount) || (params.amount as number) <= 0) {
     throw new TypeError(
       'amount must be a positive integer in MINOR units (e.g. 2500 for 25.00 EUR)',
     )

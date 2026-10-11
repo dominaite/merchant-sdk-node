@@ -17,6 +17,9 @@ export class DominaiteError extends Error {
  * - 403 INSUFFICIENT_SCOPE: the key signed correctly but does not hold the scope the route
  *   needs (payments, webhooks:manage or transactions:read). A key's scopes are fixed when it
  *   is issued, so use a key that holds the scope.
+ * - 403 VERIFY_ONLY_NOT_ENABLED: a verifyOnly session, and verify-only is not on for your
+ *   account. Nothing was created and the idempotency key is not burnt. We switch it on for
+ *   your account.
  */
 export class AuthenticationError extends DominaiteError {
   readonly errorCode: string
@@ -64,6 +67,8 @@ export const ErrorCodes = Object.freeze({
   REFUND_FAILED: 'REFUND_FAILED',
   /** 403 on any route: the key does not hold the scope the route needs. An AuthenticationError. */
   INSUFFICIENT_SCOPE: 'INSUFFICIENT_SCOPE',
+  /** 403 on a verifyOnly createCheckoutSession: verify-only is not on for your account. An AuthenticationError. */
+  VERIFY_ONLY_NOT_ENABLED: 'VERIFY_ONLY_NOT_ENABLED',
   /** 429: too many requests for your key or your IP. A RateLimitError. */
   RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
   /** 429 on chargePaymentMethod: a charge volume limit. A RateLimitError; see error.result for the window. */

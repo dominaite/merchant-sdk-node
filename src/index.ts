@@ -49,6 +49,7 @@ export {
   WALLET_TYPES,
 } from './types.js'
 export type {
+  AgreementConsent,
   AgreementWebhookData,
   AgreementWebhookEvent,
   ChargePaymentMethodParams,

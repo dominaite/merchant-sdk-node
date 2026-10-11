@@ -91,6 +91,31 @@ test('a 403 INSUFFICIENT_SCOPE without an API message still explains itself', as
   )
 })
 
+test('a 403 VERIFY_ONLY_NOT_ENABLED says we switch it on for your account', async () => {
+  const fetchImpl = respondWith(
+    403,
+    failure('VERIFY_ONLY_NOT_ENABLED', 'Verify-only sessions are not enabled for this account.', 403),
+  )
+
+  await assert.rejects(
+    () =>
+      makeClient(fetchImpl).createCheckoutSession({
+        verifyOnly: true,
+        currency: 'EUR',
+        orderReference: 'card-check-7',
+        idempotencyKey: VECTOR.idempotencyKey,
+      }),
+    (error) => {
+      assert.ok(error instanceof AuthenticationError)
+      assert.equal(error.httpStatus, 403)
+      assert.equal(error.errorCode, ErrorCodes.VERIFY_ONLY_NOT_ENABLED)
+      assert.match(error.message, /We switch it on for your account/)
+      assert.doesNotMatch(error.message, /clock|secret/)
+      return true
+    },
+  )
+})
+
 test('a 403 with a code the SDK does not know is still an AuthenticationError without the clock hint', async () => {
   const fetchImpl = respondWith(403, failure('SOME_FUTURE_REFUSAL', 'Not today', 403))
 

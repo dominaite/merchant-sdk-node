@@ -8,10 +8,33 @@ export interface CheckoutCustomer {
   phone?: string
 }
 
+/**
+ * The customer's acceptance of recurring terms, as you recorded it on your own page. Send
+ * all three fields together.
+ */
+export interface AgreementConsent {
+  /**
+   * Which wording the customer accepted. On createCheckoutSession it is a version of the
+   * PLATFORM consent text, one of the contract's recurring.consentTextVersions (for
+   * example 'recurring-2026-09'), never your own wording. On createAgreement it is your
+   * own label for your wording, 1 to 50 characters.
+   */
+  textVersion: string
+  /** When the customer accepted: ISO 8601 UTC, not in the future. */
+  acceptedAt: string
+  /** The customer's IPv4 or IPv6 address at acceptance. */
+  ip: string
+  /** Anything else the API accepts. */
+  [key: string]: unknown
+}
+
 /** Parameters for {@link DominaiteClient.createCheckoutSession}. */
 export interface CreateCheckoutSessionParams {
-  /** MINOR units - 2500 is 25.00 EUR. Integers only, never floats. */
-  amount: number
+  /**
+   * MINOR units - 2500 is 25.00 EUR. Integers only, never floats. Required and above 0,
+   * except with verifyOnly: then send 0 or leave it out.
+   */
+  amount?: number
   /** ISO 4217, e.g. 'EUR'. */
   currency: string
   /** Your own order id, <= 100 chars. Shows up in your dashboard. */
@@ -24,6 +47,13 @@ export interface CreateCheckoutSessionParams {
   theme?: 'light' | 'dark' | 'bright'
   description?: string
   /**
+   * The id (a UUID) of the storefront this payment belongs to. Leave it out and the
+   * gateway uses your default storefront. An id that is not one of your storefronts is
+   * refused with 404; a key bound to one storefront refuses a different id with
+   * STOREFRONT_MISMATCH.
+   */
+  locationId?: string
+  /**
    * Ask the gateway to keep the card on file once this payment is approved, so you can
    * charge it again later with {@link DominaiteClient.chargePaymentMethod}. The stored
    * method shows up on {@link CheckoutStatus.storedPaymentMethod} after the payment
@@ -31,6 +61,28 @@ export interface CreateCheckoutSessionParams {
    * reach you: you get an id, a brand and the last four digits.
    */
   saveCard?: boolean
+  /**
+   * Save the payer's card without a payment. The checkout places a small authorization,
+   * saves the card and releases the authorization; nobody is charged. Send amount 0 or
+   * leave it out. saveCard is implied, integration must be 'widget', and agreementId is
+   * refused. The status read then carries verifyOnly: true, and a storedPaymentMethod is
+   * what says the card is verified. Refused with 403 VERIFY_ONLY_NOT_ENABLED (an
+   * AuthenticationError) until verify-only is on for your account. We switch it on for
+   * your account.
+   */
+  verifyOnly?: boolean
+  /**
+   * The agr_ handle of a PENDING agreement from createAgreement(). It makes this the
+   * subscription session that takes the agreement's first payment, saves the card and
+   * activates the agreement. Amount and currency must be the agreement's own (on a plan
+   * with a trial only the currency is held). The card is always saved.
+   */
+  agreementId?: string
+  /**
+   * Only with agreementId: the customer's acceptance of the platform consent text.
+   * Required unless the agreement already carries consent that names a platform version.
+   */
+  consent?: AgreementConsent
   /**
    * How the payer enters the card. 'widget' (the default when omitted) is the hosted
    * cashier widget; 'fields' renders card fields in your own page with checkout.js.
