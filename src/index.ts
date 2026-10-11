@@ -1,6 +1,7 @@
 export { DominaiteClient } from './client.js'
 export {
   ApiError,
+  AUTHORIZATION_ERROR_CODES,
   AuthenticationError,
   CHARGE_ERROR_CODES,
   ChargeError,
@@ -20,6 +21,7 @@ export {
   VALIDATION_ERROR_CODES,
 } from './errors.js'
 export type {
+  AuthorizationErrorCode,
   ChargeErrorCode,
   RefundErrorCode,
   RefundFailureCode,

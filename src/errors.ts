@@ -71,6 +71,16 @@ export const STOREFRONT_ERROR_CODES = [
 export type StorefrontErrorCode = (typeof STOREFRONT_ERROR_CODES)[number]
 
 /**
+ * The codes of the contract's authorization group, in the contract's order: 403
+ * INSUFFICIENT_SCOPE, the key signed correctly but lacks the scope the route needs. It arrives
+ * as an {@link AuthenticationError} with httpStatus 403. Not retryable with the same key.
+ */
+export const AUTHORIZATION_ERROR_CODES = ['INSUFFICIENT_SCOPE'] as const
+
+/** One of the authorization codes this SDK knows about. */
+export type AuthorizationErrorCode = (typeof AUTHORIZATION_ERROR_CODES)[number]
+
+/**
  * The gateway understood the request but refused to open a checkout session.
  * Branch on `errorCode`:
  * - PAYMENT_PROCESSING_UNAVAILABLE: card payments are off right now; retry later.
