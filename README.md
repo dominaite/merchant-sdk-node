@@ -49,12 +49,29 @@ Each key holds one or more scopes. A route answers only a key that holds its sco
 | `webhooks:manage` | `createWebhookEndpoint()`, `listWebhookEndpoints()` and `deleteWebhookEndpoint()`. |
 
 A key holds `payments` alone, or one or both of the other two scopes. A key with
-`transactions:read` or `webhooks:manage` is a reporting key, and it is not bound to one storefront.
-A key issued without scopes holds `payments`. The scopes of a key are fixed when it is issued: to
-change them, issue a new key. Every key can call `ping()` and `getIntegrationContract()`.
+`transactions:read` or `webhooks:manage` is a reporting key: a second key next to your payments key.
+It is for the whole account and cannot be bound to a storefront. If your dashboard has no reporting
+key section, ask us for the key. A key issued without scopes holds `payments`. The scopes of a key
+are fixed when it is issued. Every key can call `ping()` and `getIntegrationContract()`.
 
 A call with a key that does not hold the scope throws `AuthenticationError` with `errorCode`
-`INSUFFICIENT_SCOPE` and `httpStatus` 403. Nothing was created. Use a key that holds the scope.
+`INSUFFICIENT_SCOPE` and `httpStatus` 403. Nothing was created. A payments key always gets HTTP 403
+`INSUFFICIENT_SCOPE` on the webhook endpoint methods and `listTransactions()`. Use a key that holds
+the scope.
+
+## What we switch on for your account
+
+Every merchant with a working payments key can use checkout sessions, `saveCard`, status reads,
+refunds, plans, agreements and card revokes. For the things below, ask us through Dominaite support.
+
+| What you ask us for | Without it |
+|---|---|
+| Stored-card charges: `chargePaymentMethod()` charges a stored card. | `chargePaymentMethod()` answers 503 `PAYMENT_METHOD_CHARGES_DISABLED`, thrown as `ChargeError`. |
+| Subscription sessions: a session with an `agreementId` starts a subscription. | `createCheckoutSession()` with an `agreementId` answers `success: false` with `SUBSCRIPTIONS_NOT_ENABLED`, thrown as `CheckoutRefusedError`. |
+| Scheduled charges: with them on, the platform charges the stored card each period. | The platform runs no scheduled charge and no retry, even when the subscription session works. |
+| Verify-only sessions: a `verifyOnly` session saves a card with no payment. | `createCheckoutSession()` with `verifyOnly: true` answers 403 `VERIFY_ONLY_NOT_ENABLED`, thrown as `AuthenticationError`. |
+| Card fields: we enable them per merchant on request. See [Card fields](#card-fields). | `createCheckoutSession()` with `integration: 'fields'` answers 400 `INVALID_SELECTION`. |
+| A reporting key: the webhook endpoint methods and `listTransactions()` need it. See [Key scopes](#key-scopes). | A payments key always gets HTTP 403 `INSUFFICIENT_SCOPE` on these methods, thrown as `AuthenticationError`. |
 
 ## Quickstart (zero to a signed session against dev)
 
@@ -381,6 +398,12 @@ and the expiry, and that `id` is what you charge and revoke with. Store it again
 (`paymentMethod` on the same status is something else: the gateway's string category of how the
 payer paid, `card`, `wallet` and so on.)
 
+We switch stored-card charges on for your account, so ask us first. Until then
+`chargePaymentMethod()` throws `ChargeError` with `errorCode` `PAYMENT_METHOD_CHARGES_DISABLED`
+(503). Nothing was charged. We also answer this code when we pause charges for a short time. The
+code is the same in both cases. If we never switched stored-card charges on for your account, a
+retry does not help: ask us. If they are on, retry later with the same idempotency key.
+
 ```js
 import { ChargeError, RevokeError } from '@dominaite/merchant-sdk'
 
@@ -437,9 +460,11 @@ try {
         await pollUntilSettled(error.charge.transactionId)
         break
       case 'DUPLICATE_REQUEST':
-      case 'PAYMENT_METHOD_CHARGES_DISABLED':
       case 'PAYMENT_PROCESSING_UNAVAILABLE':
         // Nothing was charged; retry later with the SAME idempotency key.
+        break
+      case 'PAYMENT_METHOD_CHARGES_DISABLED':
+        // Nothing was charged. A retry helps only when stored-card charges are on for your account.
         break
       case 'PAYMENT_METHOD_NOT_ACTIVE':
         // Revoked or expired: bring the customer back for a hosted session with saveCard.
@@ -525,15 +550,21 @@ idempotency key again.
 ## Subscriptions
 
 A plan is a recurring price that you sell. An agreement subscribes one of your customers to a
-plan. The platform then charges the saved card each period.
+plan. With scheduled charges on, the platform charges the stored card each period.
 
 1. Create a plan once for each price with `createPlan()`.
 2. Create an agreement for the customer with `createAgreement()`. It starts `pending` and charges
    nothing.
 3. Create a subscription session: `createCheckoutSession()` with the `agreementId` and the
    customer's `consent`. The checkout takes the session payment and saves the card.
-4. When that payment is approved, the agreement goes `active`. The platform then charges each
-   period and sends the `agreement.*` and `charge.*` webhooks.
+4. When that payment is approved, the agreement goes `active`. With scheduled charges on, the
+   platform charges each period. It sends a `charge.*` webhook for each of those charges.
+
+Subscription sessions and scheduled charges are two separate switches. Ask us for both. Without
+subscription sessions, `createCheckoutSession()` with an `agreementId` answers `success: false`
+with `SUBSCRIPTIONS_NOT_ENABLED`. You can still create plans and agreements, but an agreement stays
+`pending` until that first payment. Until we switch scheduled charges on, the platform runs no
+scheduled charge and no retry, even when the subscription session works.
 
 ```js
 const plan = await client.createPlan({
@@ -568,10 +599,10 @@ const session = await client.createCheckoutSession({
 On the subscription session, `consent.textVersion` is the version of the platform consent text
 that your page showed: one of `recurring.consentTextVersions` in `getIntegrationContract()`. On
 `createAgreement()`, `consent.textVersion` is your own label for your own wording. Without a
-trial, the session amount is the agreement's amount. With a trial, you choose the session amount,
-and the first scheduled charge comes when the trial ends. When the session cannot start the
-subscription, it throws `CheckoutRefusedError`, for example with `SUBSCRIPTIONS_NOT_ENABLED` or
-`AGREEMENT_NOT_PENDING`.
+trial, the session amount is the agreement's amount. With a trial, you choose the session amount.
+With scheduled charges on, the first scheduled charge comes when the trial ends. When the session
+cannot start the subscription, it throws `CheckoutRefusedError`, for example with
+`SUBSCRIPTIONS_NOT_ENABLED` or `AGREEMENT_NOT_PENDING`.
 
 The amount, the currency and the interval of a plan never change. For a new price, create a new
 plan and archive the old one with `deletePlan()`. The existing agreements keep their own price.
@@ -602,6 +633,10 @@ session or the charge returned. The amount is minor units of the payment's curre
 with `toMinorUnits()`; omit it to refund everything still refundable (the SDK then sends no
 `amount` at all). A refund is always in the payment's currency, and partial refunds add up: the
 amount may not exceed what is left after earlier refunds and refunds still in progress.
+
+The API refunds online (card-not-present) payments only. `createRefund()` on a payment made on a
+terminal answers 404 `PAYMENT_NOT_FOUND`. Whoever holds the payments key can refund up to the paid
+amount. Keep that key on your server.
 
 ```js
 import { ErrorCodes, RefundError, toMinorUnits } from '@dominaite/merchant-sdk'
@@ -951,7 +986,9 @@ IP; going over throws `RateLimitError`, which carries `retryAfterSeconds`.
 
 ### Manage endpoints with the API
 
-A key with the `webhooks:manage` scope can manage your webhook endpoints from your code.
+A reporting key with the `webhooks:manage` scope can manage your webhook endpoints from your code.
+A payments key cannot: see [Key scopes](#key-scopes). You can also register an endpoint in the
+dashboard, **Webhooks** tab. That needs no key.
 
 ```js
 const endpoint = await client.createWebhookEndpoint({
@@ -982,8 +1019,9 @@ endpoint.
 ## Transactions
 
 `listTransactions()` lists your card-not-present payments, one page at a time, oldest first. It
-needs a key with the `transactions:read` scope. Refunds are not rows of their own: a refunded
-payment shows `refundedAmount` and its status.
+needs a reporting key with the `transactions:read` scope. A payments key cannot call it: see
+[Key scopes](#key-scopes). Refunds are not rows of their own: a refunded payment shows
+`refundedAmount` and its status.
 
 ```js
 let cursor
