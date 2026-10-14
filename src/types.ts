@@ -753,6 +753,13 @@ export interface ListTransactionsParams {
   from: string | Date
   /** Window end, exclusive: later than from and at most 31 days after it. ISO 8601 UTC or a Date. */
   to: string | Date
+  /**
+   * Settlement window start, inclusive: a date (2026-10-13) or a Date, sent as its UTC date.
+   * Send it with settledTo. from and to still apply on createdAt.
+   */
+  settledFrom?: string | Date
+  /** Settlement window end, exclusive: later than settledFrom and at most 31 days after it. */
+  settledTo?: string | Date
   /** Only payments that are in this status now. */
   status?: TransactionStatus | (string & {})
   /** Items per page, 1 to 100. The API uses 50 when you leave it out. */
@@ -783,6 +790,14 @@ export interface Transaction {
   storedPaymentMethodId: string | null
   /** MINOR units refunded so far; null when nothing was refunded. */
   refundedAmount: number | null
+  /** The acquirer fee of this payment in MINOR units; null until it is settled. It can change later. */
+  fee: number | null
+  /** amount minus fee in MINOR units; null when fee is null. Payout deductions are not in it. */
+  netAmount: number | null
+  /** ISO 8601 UTC at midnight, the date the acquirer settled the payment; null until settled. */
+  settledAt: string | null
+  /** The id of the payout that paid this money to you; null until it is paid out. */
+  payoutId: string | null
   [key: string]: unknown
 }
 
@@ -790,7 +805,7 @@ export interface Transaction {
 export interface TransactionPage {
   /** The payments of this page, by createdAt then transactionId. Empty when the window has none. */
   items: Transaction[]
-  /** Send it back as cursor, with the same from, to and status, for the next page. Null on the last page. */
+  /** Send it back as cursor, with the same from, to, settledFrom, settledTo and status, for the next page. Null on the last page. */
   nextCursor: string | null
   [key: string]: unknown
 }

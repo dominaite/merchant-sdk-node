@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1
+
+### Added
+
+- `Transaction` has `fee`, `netAmount`, `settledAt` and `payoutId`. They are `null` until the
+  acquirer settles the payment, and `payoutId` until the money is paid out. `fee` and `netAmount`
+  are in minor units.
+- `ListTransactionsParams` has `settledFrom` and `settledTo`: a settlement-date window, sent as
+  dates (`2026-10-13`). A `Date` is sent as its UTC date. The SDK still signs the path only.
+
 ## 0.5.0
 
 ### Added

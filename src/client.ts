@@ -54,7 +54,7 @@ const AGREEMENTS_PATH = '/merchant-api/agreements'
 const WEBHOOKS_PATH = '/merchant-api/webhooks'
 const TRANSACTIONS_PATH = '/merchant-api/transactions'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
-const SDK_VERSION = '0.5.0'
+const SDK_VERSION = '0.5.1'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /**
  * A payment method id is opaque (pm_...), so this only pins what keeps it a single path
@@ -695,6 +695,10 @@ export class DominaiteClient {
    * The window is from (inclusive) to to (exclusive), at most 31 days. The parameters go
    * in the query string, which is not signed: the SDK signs the path only.
    *
+   * settledFrom (inclusive) and settledTo (exclusive) are dates. Send both to list only the
+   * payments the acquirer settled in that window; from and to still apply on createdAt.
+   * fee, netAmount, settledAt and payoutId are null until the payment is settled.
+   *
    * Throws ApiError with a validation code on a 400 (window, status, limit or cursor).
    * Otherwise AuthenticationError (403 INSUFFICIENT_SCOPE without transactions:read),
    * RateLimitError or TransportError.
@@ -1151,6 +1155,8 @@ function toAgreement(data: Record<string, unknown>): Agreement {
   }
 }
 
+const SETTLED_DATE_PARAMS = new Set(['settledFrom', 'settledTo'])
+
 /** The query string of a transaction list: '?from=...&to=...', every given parameter as given. */
 function transactionQuery(params: ListTransactionsParams): string {
   if (!isPlainObject(params)) {
@@ -1165,7 +1171,8 @@ function transactionQuery(params: ListTransactionsParams): string {
       if (Number.isNaN(value.getTime())) {
         throw new TypeError(`${name} must be a valid Date`)
       }
-      search.append(name, value.toISOString())
+      // A settlement window takes a date only: the API refuses a time of day.
+      search.append(name, SETTLED_DATE_PARAMS.has(name) ? value.toISOString().slice(0, 10) : value.toISOString())
       continue
     }
     search.append(name, String(value))
@@ -1191,6 +1198,10 @@ function toTransaction(data: Record<string, unknown>): Transaction {
     completedAt: stringOrNull(data['completedAt']),
     storedPaymentMethodId: stringOrNull(data['storedPaymentMethodId']),
     refundedAmount: numberOrNull(data['refundedAmount']),
+    fee: numberOrNull(data['fee']),
+    netAmount: numberOrNull(data['netAmount']),
+    settledAt: stringOrNull(data['settledAt']),
+    payoutId: stringOrNull(data['payoutId']),
   }
 }
 

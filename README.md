@@ -1047,6 +1047,26 @@ string and signs the path only.
 A row shows the status at the time of the read. For a statement, end the window a few minutes in
 the past. Read the window again later to get status changes such as refunds.
 
+`fee`, `netAmount`, `settledAt` and `payoutId` are `null` until the acquirer settles the payment.
+This is usually the next business day. `netAmount` is `amount` minus the fee of this payment only.
+Deductions on the whole payout are not in it.
+
+To get the payments of one settlement day, send that day as `settledFrom` and the next day as
+`settledTo`. Both are dates. Also send a `from` and `to` that cover when the payments were created,
+for example the last 31 days:
+
+```js
+const page = await client.listTransactions({
+  from: '2026-09-13T00:00:00Z',
+  to: '2026-10-14T00:00:00Z',
+  settledFrom: '2026-10-13',  // inclusive
+  settledTo: '2026-10-14',    // exclusive
+})
+```
+
+The fees can change after they appear. Read a settlement day again before you close your books on
+it.
+
 ## Integration contract
 
 `getIntegrationContract()` answers the contract that the API publishes about itself: routes,
