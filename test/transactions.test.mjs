@@ -137,7 +137,65 @@ test('listTransactions answers every row with absent fields as null, and the nex
   assert.deepEqual(result.items, [
     { ...CHECKOUT_ROW, storedPaymentMethodId: null },
     { ...CHARGE_ROW, orderReference: null, completedAt: null, refundedAmount: null },
-  ])
+  ].map((row) => ({ fee: null, netAmount: null, settledAt: null, payoutId: null, ...row })))
+})
+
+test('listTransactions reads the settlement fields of a settled row, and null on a row not settled yet', async () => {
+  const settled = {
+    ...CHECKOUT_ROW,
+    fee: 75,
+    netAmount: 2425,
+    settledAt: '2026-10-03T00:00:00Z',
+    payoutId: '33333333-3333-4333-8333-333333333333',
+  }
+  const notSettled = { ...CHARGE_ROW, fee: null, netAmount: null, settledAt: null, payoutId: null }
+  const { fetchImpl } = recordingFetch(page([settled, notSettled]))
+
+  const [first, second] = (await makeClient(fetchImpl).listTransactions({ from: FROM, to: TO })).items
+
+  assert.equal(first.fee, 75)
+  assert.equal(first.netAmount, 2425)
+  assert.equal(first.settledAt, '2026-10-03T00:00:00Z')
+  assert.equal(first.payoutId, '33333333-3333-4333-8333-333333333333')
+  for (const name of ['fee', 'netAmount', 'settledAt', 'payoutId']) {
+    assert.equal(second[name], null, name)
+  }
+})
+
+test('listTransactions sends the settlement window as dates and still signs the path only', async () => {
+  const { fetchImpl, calls } = recordingFetch(page([]), page([]))
+  const client = makeClient(fetchImpl)
+
+  await client.listTransactions({ from: FROM, to: TO, settledFrom: '2026-10-13', settledTo: '2026-10-14' })
+  await client.listTransactions({
+    from: FROM,
+    to: TO,
+    settledFrom: new Date(Date.UTC(2026, 9, 13, 15, 30)),
+    settledTo: new Date(Date.UTC(2026, 9, 14)),
+  })
+
+  for (const { url, init } of calls) {
+    const sent = new URL(url)
+    assert.equal(sent.origin + sent.pathname, BASE_URL + PATH)
+    assert.deepEqual(Object.fromEntries(sent.searchParams), {
+      from: FROM,
+      to: TO,
+      settledFrom: '2026-10-13',
+      settledTo: '2026-10-14',
+    })
+    assert.equal(
+      init.headers['X-Signature'],
+      expectedSignature({ timestamp: init.headers['X-Timestamp'], method: 'GET', path: PATH, idempotencyKey: '', body: '' }),
+    )
+  }
+})
+
+test('listTransactions leaves out a settlement window that is not set', async () => {
+  const { fetchImpl, calls } = recordingFetch(page([]))
+
+  await makeClient(fetchImpl).listTransactions({ from: FROM, to: TO, settledFrom: undefined, settledTo: null })
+
+  assert.deepEqual(Object.fromEntries(new URL(calls[0].url).searchParams), { from: FROM, to: TO })
 })
 
 test('listTransactions pages through a window by sending nextCursor back until it is null', async () => {
