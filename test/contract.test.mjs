@@ -64,6 +64,20 @@ test('the checkout session exposes exactly the contract fields', () => {
   )
 })
 
+test('the published customer type declares every customer field the API accepts', () => {
+  // createSessionFields in the live contract: customer.firstName ... customer.state.
+  assert.deepEqual(declaredFields('CheckoutCustomer'), [
+    'firstName',
+    'lastName',
+    'email',
+    'phone',
+    'address',
+    'city',
+    'postalCode',
+    'state',
+  ])
+})
+
 test('the status response exposes exactly the contract fields', () => {
   assert.deepEqual(declaredFields('CheckoutStatus'), CONTRACT.endpoints.getStatus.fields)
 })

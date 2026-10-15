@@ -158,6 +158,29 @@ test('a subscription session sends agreementId, consent and every other field as
   assertSigned(calls[0].init)
 })
 
+test('the billing address fields reach the wire body unchanged', async () => {
+  const { fetchImpl, calls } = recordingFetch({ success: true, checkout: PAYMENT_CHECKOUT })
+
+  const customer = {
+    firstName: 'Ana',
+    email: 'ana@example.test',
+    address: '1 Market St, Apt 4',
+    city: 'San Francisco',
+    postalCode: '94105',
+    state: 'CA',
+  }
+  await makeClient(fetchImpl).createCheckoutSession({
+    amount: 2500,
+    currency: 'USD',
+    orderReference: 'order-1042',
+    customer,
+    idempotencyKey: KEY,
+  })
+
+  assert.deepEqual(JSON.parse(calls[0].init.body).customer, customer)
+  assertSigned(calls[0].init)
+})
+
 test('the status read of a verify-only session carries verifyOnly and the saved card', async () => {
   const read = {
     transactionId: CHECKOUT.transactionId,
