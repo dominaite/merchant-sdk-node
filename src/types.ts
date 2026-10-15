@@ -6,6 +6,21 @@ export interface CheckoutCustomer {
   lastName?: string
   email?: string
   phone?: string
+  /**
+   * Billing street address, one line, at most 200 characters. The checkout asks the payer
+   * for address, city and postal code only when the payment processor needs them, and
+   * never for a field you send.
+   */
+  address?: string
+  /** Billing city, at most 100 characters. */
+  city?: string
+  /** Billing postal code, at most 20 characters. */
+  postalCode?: string
+  /**
+   * Billing state or province code (ISO 3166-2 subdivision, e.g. 'CA' or 'NSW'), at most
+   * 50 characters. Only used for the United States, Canada and Australia.
+   */
+  state?: string
 }
 
 /**
