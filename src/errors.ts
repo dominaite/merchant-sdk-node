@@ -259,17 +259,17 @@ export type ChargeErrorCode = (typeof CHARGE_ERROR_CODES)[number]
  *   on for your account, a retry does not help: ask us. If they are on, retry later with the
  *   SAME key.
  *
- * `result` is the whole envelope the gateway sent, for fields not modelled above.
+ * - PAYMENT_METHOD_NOT_FOUND or AGREEMENT_NOT_FOUND (404): the id is not one of yours.
+ *
+ * A subclass of {@link ApiError}, so an existing `instanceof ApiError` branch still catches
+ * it. `result` is the whole envelope the gateway sent, for fields not modelled above.
  */
-export class ChargeError extends DominaiteError {
-  readonly httpStatus: number
-  readonly errorCode: string
+export class ChargeError extends ApiError {
+  declare readonly errorCode: string
   /** The charge row the gateway attached to its answer, when it did. */
   readonly charge?: PaymentMethodCharge
   /** Shortcut for charge.transactionId, for polling getStatus(). */
   readonly transactionId?: string
-  /** The full envelope, for fields not modelled above. */
-  readonly result: Record<string, unknown>
 
   constructor(
     httpStatus: number,
@@ -278,12 +278,9 @@ export class ChargeError extends DominaiteError {
     charge?: PaymentMethodCharge,
     result: Record<string, unknown> = {},
   ) {
-    super(message)
-    this.httpStatus = httpStatus
-    this.errorCode = errorCode
+    super(httpStatus, message, errorCode, result)
     this.charge = charge
     this.transactionId = charge?.transactionId
-    this.result = result
   }
 }
 
@@ -432,8 +429,29 @@ export class RateLimitError extends DominaiteError {
  * Network-level failure or a 5xx - the request may or may not have reached the API.
  * Safe to retry WITH THE SAME idempotency key; a retried key never creates a second payment.
  *
+ * On a 5xx the HTTP status is on `httpStatus` and the API's code, when it sent one (for
+ * example INTERNAL_ERROR or MERCHANT_API_UNAVAILABLE), on `errorCode`. Both are undefined
+ * when the request never got an answer.
+ *
  * If the earlier attempt did reach the API and its session is still open, the retry gets
  * that original session back. If the payment has moved on (paid, failed, expired), the
  * retry is refused as a replay ({@link CheckoutRefusedError}) naming the transaction.
  */
-export class TransportError extends DominaiteError {}
+export class TransportError extends DominaiteError {
+  /** The 5xx status, or undefined when no answer arrived. */
+  readonly httpStatus?: number
+  /** The API's machine-readable code on a 5xx, when it sent one. */
+  readonly errorCode?: string
+  /** The full envelope of a 5xx answer ({} when there was none to parse). */
+  readonly result: Record<string, unknown>
+
+  constructor(
+    message: string,
+    options: { httpStatus?: number; errorCode?: string; result?: Record<string, unknown> } = {},
+  ) {
+    super(message)
+    this.httpStatus = options.httpStatus
+    this.errorCode = options.errorCode
+    this.result = options.result ?? {}
+  }
+}

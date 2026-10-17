@@ -1,6 +1,7 @@
 import {
   ApiError,
   AuthenticationError,
+  CHARGE_ERROR_CODES,
   ChargeError,
   CheckoutRefusedError,
   DominaiteError,
@@ -8,6 +9,7 @@ import {
   REFUND_ERROR_CODES,
   RefundError,
   type RefundErrorCode,
+  REVOKE_ERROR_CODES,
   RevokeError,
   STOREFRONT_ERROR_CODES,
   StorefrontError,
@@ -68,6 +70,8 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  * path and request another.
  */
 const PAYMENT_METHOD_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/
+/** The shape the API issues (pm_ and 32 hex). The API signs it in lowercase. */
+const STORED_PAYMENT_METHOD_ID_PATTERN = /^pm_[0-9a-f]{32}$/i
 /** A refund id (re_...) is opaque too, and goes into the signed path the same way. */
 const REFUND_ID_PATTERN = PAYMENT_METHOD_ID_PATTERN
 /** Plan (plan_...) and agreement (agr_...) ids are case-sensitive handles, signed verbatim too. */
@@ -78,12 +82,24 @@ const MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 const PLAINTEXT_ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 /**
  * Statuses that stay generic on the payment-method routes even when the envelope
- * carries a code: validation (400), authentication (401, 403), unknown id (404) and
- * rate limiting (429) mean the same thing on every route and keep their usual errors.
- * Everything else with a code is the gateway telling this route something specific
- * (a decline, an unknown outcome, a refusal) and arrives as ChargeError / RevokeError.
+ * carries a code: validation (400), authentication (401, 403) and rate limiting (429)
+ * mean the same thing on every route and keep their usual errors. Revoke keeps 404
+ * generic too. Everything else with a code is the gateway telling this route something
+ * specific (a decline, an unknown outcome, a refusal) and arrives as ChargeError /
+ * RevokeError, unless it is one of the generic server codes below.
  */
-const GENERIC_FAILURE_STATUSES = new Set([400, 401, 403, 404, 429])
+const GENERIC_CHARGE_FAILURE_STATUSES = new Set([400, 401, 403, 429])
+const GENERIC_REVOKE_FAILURE_STATUSES = new Set([400, 401, 403, 404, 429])
+/**
+ * The 5xx codes any route can answer, from the gateway's error boundary and its key
+ * check: the API being unavailable, not the route refusing. They arrive as
+ * TransportError with the code kept, unless the route documents the code itself.
+ */
+const GENERIC_SERVER_ERROR_CODES: ReadonlySet<string> = new Set([
+  'INTERNAL_ERROR',
+  'SERVICE_UNAVAILABLE',
+  'MERCHANT_API_UNAVAILABLE',
+])
 /** Ping warns above this clock skew; the gateway rejects requests at 300 seconds. */
 const CLOCK_SKEW_WARNING_SECONDS = 60
 /** A Dominaite-Sdk-Notice value is cut to this length before it is read. */
@@ -229,17 +245,27 @@ export class DominaiteClient {
    */
   async createCheckoutSession(params: CreateCheckoutSessionParams): Promise<CheckoutSession> {
     const { idempotencyKey, body } = this.#prepareSessionRequest(params)
-    const response = await this.#request('POST', SESSIONS_PATH, body, idempotencyKey)
+    const reply = await this.#send('POST', SESSIONS_PATH, body, idempotencyKey)
+    if (reply.status >= 400) {
+      throw rejection(reply)
+    }
+    const response = reply.payload
 
     if (response['success'] !== true || typeof response['checkout'] !== 'object' || response['checkout'] === null) {
+      const errorCode = typeof response['errorCode'] === 'string' ? response['errorCode'] : 'UNKNOWN'
+      const errorMessage =
+        typeof response['errorMessage'] === 'string' ? response['errorMessage'] : 'The checkout session was refused.'
+      // A storefront-bound key replayed for another storefront is refused at HTTP 200. It is
+      // the same configuration problem as the 400, so it gets the same error.
+      if (isStorefrontErrorCode(errorCode)) {
+        throw new StorefrontError(reply.status, errorCode, errorMessage, reply.envelope)
+      }
       // A replay refusal names the transaction your key collided with. Carry it (and
       // the whole payload) so the caller can reconcile with getStatus() instead of
       // minting a second payment for the same order.
       throw new CheckoutRefusedError(
-        typeof response['errorCode'] === 'string' ? response['errorCode'] : 'UNKNOWN',
-        typeof response['errorMessage'] === 'string'
-          ? response['errorMessage']
-          : 'The checkout session was refused.',
+        errorCode,
+        errorMessage,
         typeof response['transactionId'] === 'string' ? response['transactionId'] : undefined,
         response,
       )
@@ -363,17 +389,19 @@ export class DominaiteClient {
    * payment, and getStatus(charge.transactionId) carries the latest class. Never read null
    * as hard. 'pending' is not terminal - poll getStatus(charge.transactionId).
    *
-   * Throws ChargeError when the gateway answered with a code instead of a charge:
-   * CHARGE_OUTCOME_UNKNOWN (502, the charge MAY have happened - poll
-   * error.charge.transactionId, never retry under a new key), CHARGE_FAILED (502, nothing
-   * charged), PAYMENT_METHOD_NOT_ACTIVE or DUPLICATE_REQUEST (409), IDEMPOTENCY_KEY_REUSED
-   * (422), PAYMENT_PROCESSING_UNAVAILABLE (503, retry later with the same key) or
+   * Throws ChargeError when the gateway answered with a code instead of a charge (the full
+   * list is CHARGE_ERROR_CODES): CHARGE_OUTCOME_UNKNOWN (502, the charge MAY have happened -
+   * poll error.charge.transactionId, never retry under a new key), CHARGE_FAILED (502,
+   * nothing charged), PAYMENT_METHOD_NOT_FOUND or AGREEMENT_NOT_FOUND (404),
+   * PAYMENT_METHOD_NOT_ACTIVE, CHARGE_IN_PROGRESS or DUPLICATE_REQUEST (409),
+   * IDEMPOTENCY_KEY_REUSED or an agreement term the charge breaks (422),
+   * PAYMENT_PROCESSING_UNAVAILABLE (503, retry later with the same key) or
    * PAYMENT_METHOD_CHARGES_DISABLED (503). If we never switched stored-card charges on for
    * your account, a retry on PAYMENT_METHOD_CHARGES_DISABLED does not help: ask us. If they
    * are on, retry later with the same key. A storefront refusal is a StorefrontError, as on
-   * sessions. Otherwise AuthenticationError, RateLimitError, ApiError
-   * (404 for an id that is not yours, 400 validation) or TransportError (network - safe
-   * to retry with the same key).
+   * sessions. Otherwise AuthenticationError, RateLimitError, ApiError (400 validation, or a
+   * 404 without a code) or TransportError (network, or a 5xx such as INTERNAL_ERROR that is
+   * not a charge code - safe to retry with the same key).
    */
   async chargePaymentMethod(
     paymentMethodId: string,
@@ -397,8 +425,9 @@ export class DominaiteClient {
     if (
       errorCode !== '' &&
       reply.status >= 400 &&
-      !GENERIC_FAILURE_STATUSES.has(reply.status) &&
-      !isStorefrontErrorCode(errorCode)
+      !GENERIC_CHARGE_FAILURE_STATUSES.has(reply.status) &&
+      !isStorefrontErrorCode(errorCode) &&
+      !(reply.status >= 500 && isGenericServerCode(errorCode, CHARGE_ERROR_CODES))
     ) {
       throw new ChargeError(
         reply.status,
@@ -423,8 +452,8 @@ export class DominaiteClient {
    * Throws RevokeError when the gateway refused and nothing changed:
    * MERCHANT_API_UNAVAILABLE (503, retry later) or UPSTREAM_CONTRACT_ERROR (502, the
    * provider refused for good - contact support with the id). An id that is not yours
-   * throws an ApiError with httpStatus 404. Not a payment operation: no idempotency key
-   * is signed.
+   * throws an ApiError with httpStatus 404. Any other 5xx (INTERNAL_ERROR, for example) is a
+   * TransportError with the code kept. Not a payment operation: no idempotency key is signed.
    */
   async revokePaymentMethod(paymentMethodId: string): Promise<void> {
     const id = normalizePaymentMethodId(paymentMethodId)
@@ -435,7 +464,11 @@ export class DominaiteClient {
     }
 
     const errorCode = stringOr(reply.error['code'], '')
-    if (errorCode !== '' && !GENERIC_FAILURE_STATUSES.has(reply.status)) {
+    if (
+      errorCode !== '' &&
+      !GENERIC_REVOKE_FAILURE_STATUSES.has(reply.status) &&
+      !(reply.status >= 500 && isGenericServerCode(errorCode, REVOKE_ERROR_CODES))
+    ) {
       throw new RevokeError(
         reply.status,
         errorCode,
@@ -1088,16 +1121,21 @@ function accessDeniedMessage(httpStatus: number, errorCode: string, apiMessage: 
   return `Access denied (HTTP 403 ${errorCode}): this API key may not call this route.`
 }
 
-/** The generic reading of a failed reply: 5xx is the API being unavailable, 4xx a rejection. */
+/**
+ * The generic reading of a failed reply: 5xx is the API being unavailable, 4xx a rejection.
+ * Either way the code the API sent stays on the error.
+ */
 function rejection(reply: Reply): DominaiteError {
-  if (reply.status >= 500) {
-    return new TransportError(
-      `The Dominaite API is unavailable (HTTP ${reply.status}); retry with the same idempotency key.`,
-    )
-  }
   // Carry the machine-readable code: a validation rejection like
   // IDEMPOTENCY_KEY_REQUIRED is only actionable if the caller can branch on it.
   const errorCode = stringOr(reply.payload['errorCode'], stringOr(reply.error['code'], ''))
+  if (reply.status >= 500) {
+    return new TransportError(
+      `The Dominaite API is unavailable (HTTP ${reply.status}${errorCode === '' ? '' : ` ${errorCode}`}); ` +
+        'retry with the same idempotency key.',
+      { httpStatus: reply.status, errorCode: errorCode === '' ? undefined : errorCode, result: reply.envelope },
+    )
+  }
   const message = stringOr(reply.payload['errorMessage'], stringOr(reply.error['message'], 'Request rejected'))
   if (isStorefrontErrorCode(errorCode)) {
     return new StorefrontError(reply.status, errorCode, message, reply.envelope)
@@ -1160,6 +1198,11 @@ function toRefund(data: Record<string, unknown>): Refund {
 /** Storefront refusals keep their own error on sessions and charges alike. */
 function isStorefrontErrorCode(code: string): code is StorefrontErrorCode {
   return (STOREFRONT_ERROR_CODES as readonly string[]).includes(code)
+}
+
+/** A generic server code the route does not document as its own. */
+function isGenericServerCode(code: string, routeCodes: readonly string[]): boolean {
+  return GENERIC_SERVER_ERROR_CODES.has(code) && !routeCodes.includes(code)
 }
 
 /**
@@ -1405,7 +1448,8 @@ function normalizePaymentMethodId(paymentMethodId: unknown): string {
   if (!PAYMENT_METHOD_ID_PATTERN.test(normalized)) {
     throw new TypeError('paymentMethodId must be the id from getStatus().storedPaymentMethod')
   }
-  return normalized
+  // The API signs a pm_ id in lowercase, so an id typed in uppercase would fail the signature.
+  return STORED_PAYMENT_METHOD_ID_PATTERN.test(normalized) ? normalized.toLowerCase() : normalized
 }
 
 /** The payment id goes into the signed path in the lowercase hyphenated form the gateway signs. */

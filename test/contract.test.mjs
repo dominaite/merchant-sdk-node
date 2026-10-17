@@ -467,7 +467,7 @@ test('CHARGE_OUTCOME_UNKNOWN carries the transaction to poll', async () => {
   assert.equal(error.charge.chargeId, example.body.data.chargeId)
 })
 
-test('a charge against an unknown id is the generic ApiError 404 with the contract code', async () => {
+test('a charge against an unknown id is a ChargeError 404 with the contract code', async () => {
   const { chargePaymentMethod, getStatus } = CONTRACT.endpoints
   const paymentMethodId = getStatus.savedCardExample.storedPaymentMethod.id
   const example = chargePaymentMethod.notFoundExample
@@ -482,8 +482,8 @@ test('a charge against an unknown id is the generic ApiError 404 with the contra
     }),
   )
 
+  assert.ok(error instanceof ChargeError)
   assert.ok(error instanceof ApiError)
-  assert.ok(!(error instanceof ChargeError))
   assert.equal(error.httpStatus, 404)
   assert.equal(error.errorCode, example.code)
 })
