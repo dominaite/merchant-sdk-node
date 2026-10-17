@@ -59,7 +59,7 @@ export interface CreateCheckoutSessionParams {
   country?: string
   /** ISO 639-1 widget UI language. */
   language?: string
-  theme?: 'light' | 'dark' | 'bright'
+  theme?: 'light' | 'dark' | 'bright' | (string & {})
   description?: string
   /**
    * The id (a UUID) of the storefront this payment belongs to. Leave it out and the

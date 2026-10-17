@@ -62,6 +62,8 @@ const WEBHOOKS_PATH = '/merchant-api/webhooks'
 const TRANSACTIONS_PATH = '/merchant-api/transactions'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
 const SDK_VERSION = '0.6.0'
+/** The API takes an ISO 4217 code in uppercase and answers 400 INVALID_FORMAT to anything else. */
+const CURRENCY_PATTERN = /^[A-Z]{3}$/
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /**
  * A payment method id is opaque (pm_...), so this only pins what keeps it a single path
@@ -349,7 +351,7 @@ export class DominaiteClient {
    * should make you keep polling, never silently close an order that is still live.
    *
    * Poll after the payer returns to you, or on your order timeout - not in a tight loop;
-   * the endpoint is rate limited per key (60/min/key, 120/min/IP) and going over throws
+   * the endpoint is rate limited (120 per minute per key, 240 per minute per IP) and going over throws
    * RateLimitError.
    */
   async getStatus(transactionId: string): Promise<CheckoutStatus> {
@@ -1264,6 +1266,9 @@ function validateMoneyParams(
     )
   }
 
+  if (typeof params.currency !== 'string' || !CURRENCY_PATTERN.test(params.currency)) {
+    throw new TypeError('currency must be a three-letter uppercase ISO 4217 code, e.g. EUR')
+  }
   if (typeof params.orderReference !== 'string' || params.orderReference === '') {
     throw new TypeError('orderReference must be a non-empty string')
   }
