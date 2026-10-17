@@ -35,8 +35,11 @@ function recordingFetch(body = { success: true, checkout: CHECKOUT }) {
   return { fetchImpl, calls }
 }
 
+/** Retries run at once in tests; the retry tests check the waits themselves. */
+const noWait = async () => {}
+
 function makeClient(fetchImpl) {
-  return new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl })
+  return new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl, sleep: noWait })
 }
 
 function assertSigned(init) {
@@ -231,4 +234,24 @@ test('the status read of a subscription payment carries the agreement, isRecurri
   assert.equal(status.declineClass, 'soft_funds')
   assert.equal(status.isRecurring, true)
   assert.equal(status.sequence, 3)
+})
+
+test('a currency that is not three uppercase letters throws before anything is sent', async () => {
+  const { fetchImpl, calls } = recordingFetch()
+  const client = makeClient(fetchImpl)
+  for (const currency of ['eur', 'EU', 'EURO', ' EUR', 978]) {
+    await assert.rejects(
+      client.createCheckoutSession({ amount: 2500, currency, orderReference: 'order-1', idempotencyKey: 'key-1' }),
+      TypeError,
+      String(currency),
+    )
+    await assert.rejects(
+      client.chargePaymentMethod('pm_0123456789abcdef0123456789abcdef', {
+        amount: 2500, currency, orderReference: 'order-1', idempotencyKey: 'key-1',
+      }),
+      TypeError,
+      String(currency),
+    )
+  }
+  assert.equal(calls.length, 0)
 })

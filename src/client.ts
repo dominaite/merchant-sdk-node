@@ -1,6 +1,7 @@
 import {
   ApiError,
   AuthenticationError,
+  CHARGE_ERROR_CODES,
   ChargeError,
   CheckoutRefusedError,
   DominaiteError,
@@ -8,11 +9,13 @@ import {
   REFUND_ERROR_CODES,
   RefundError,
   type RefundErrorCode,
+  REVOKE_ERROR_CODES,
   RevokeError,
   STOREFRONT_ERROR_CODES,
   StorefrontError,
   type StorefrontErrorCode,
   TransportError,
+  withRequestId,
 } from './errors.js'
 import { countCodePoints, MAX_FIELD_CODE_POINTS, normalizeIdempotencyKey } from './idempotency.js'
 import { signRequest } from './signing.js'
@@ -60,6 +63,8 @@ const WEBHOOKS_PATH = '/merchant-api/webhooks'
 const TRANSACTIONS_PATH = '/merchant-api/transactions'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
 const SDK_VERSION = '0.6.0'
+/** The API takes an ISO 4217 code in uppercase and answers 400 INVALID_FORMAT to anything else. */
+const CURRENCY_PATTERN = /^[A-Z]{3}$/
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /**
  * A payment method id is opaque (pm_...), so this only pins what keeps it a single path
@@ -68,6 +73,8 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  * path and request another.
  */
 const PAYMENT_METHOD_ID_PATTERN = /^[A-Za-z0-9_-]{1,100}$/
+/** The shape the API issues (pm_ and 32 hex). The API signs it in lowercase. */
+const STORED_PAYMENT_METHOD_ID_PATTERN = /^pm_[0-9a-f]{32}$/i
 /** A refund id (re_...) is opaque too, and goes into the signed path the same way. */
 const REFUND_ID_PATTERN = PAYMENT_METHOD_ID_PATTERN
 /** Plan (plan_...) and agreement (agr_...) ids are case-sensitive handles, signed verbatim too. */
@@ -78,12 +85,32 @@ const MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 const PLAINTEXT_ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
 /**
  * Statuses that stay generic on the payment-method routes even when the envelope
- * carries a code: validation (400), authentication (401, 403), unknown id (404) and
- * rate limiting (429) mean the same thing on every route and keep their usual errors.
- * Everything else with a code is the gateway telling this route something specific
- * (a decline, an unknown outcome, a refusal) and arrives as ChargeError / RevokeError.
+ * carries a code: validation (400), authentication (401, 403) and rate limiting (429)
+ * mean the same thing on every route and keep their usual errors. Revoke keeps 404
+ * generic too. Everything else with a code is the gateway telling this route something
+ * specific (a decline, an unknown outcome, a refusal) and arrives as ChargeError /
+ * RevokeError, unless it is one of the generic server codes below.
  */
-const GENERIC_FAILURE_STATUSES = new Set([400, 401, 403, 404, 429])
+const GENERIC_CHARGE_FAILURE_STATUSES = new Set([400, 401, 403, 429])
+const GENERIC_REVOKE_FAILURE_STATUSES = new Set([400, 401, 403, 404, 429])
+/**
+ * The 5xx codes any route can answer, from the gateway's error boundary and its key
+ * check: the API being unavailable, not the route refusing. They arrive as
+ * TransportError with the code kept, unless the route documents the code itself.
+ */
+const GENERIC_SERVER_ERROR_CODES: ReadonlySet<string> = new Set([
+  'INTERNAL_ERROR',
+  'SERVICE_UNAVAILABLE',
+  'MERCHANT_API_UNAVAILABLE',
+])
+/** Retries after the first attempt, unless the client options say otherwise. */
+const DEFAULT_MAX_RETRIES = 2
+/** The first retry waits a random time up to this; each further retry doubles the ceiling. */
+const RETRY_BASE_DELAY_MS = 500
+/** No retry waits longer than this. */
+const RETRY_MAX_DELAY_MS = 8_000
+/** The code the API sends while card payments are briefly off: always worth a retry. */
+const PAYMENT_PROCESSING_UNAVAILABLE = 'PAYMENT_PROCESSING_UNAVAILABLE'
 /** Ping warns above this clock skew; the gateway rejects requests at 300 seconds. */
 const CLOCK_SKEW_WARNING_SECONDS = 60
 /** A Dominaite-Sdk-Notice value is cut to this length before it is read. */
@@ -96,6 +123,8 @@ const MAX_REQUEST_ID_LENGTH = 128
 /** A parsed reply, whatever its status. Auth and rate-limit failures never get this far. */
 interface Reply {
   status: number
+  /** The Dominaite-Request-Id header, or metadata.requestId from the body. Null when neither. */
+  requestId: string | null
   /** The whole JSON body ({} for a 204). */
   envelope: Record<string, unknown>
   /** envelope.data when the gateway wrapped the answer, the envelope itself otherwise. */
@@ -143,6 +172,9 @@ export class DominaiteClient {
   readonly #userAgent: string
   readonly #onWarning: ((message: string) => void) | undefined
   readonly #onDebug: ((line: string) => void) | undefined
+  readonly #maxRetries: number
+  readonly #sleep: (ms: number) => Promise<void>
+  readonly #random: () => number
   /** The notice values this client has warned about, so each one warns once. */
   readonly #seenNotices = new Set<string>()
 
@@ -161,6 +193,12 @@ export class DominaiteClient {
     this.#userAgent = buildUserAgent(options.userAgent)
     this.#onWarning = optionalCallback(options.onWarning, 'onWarning')
     this.#onDebug = optionalCallback(options.onDebug, 'onDebug')
+    this.#maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES
+    if (!Number.isSafeInteger(this.#maxRetries) || this.#maxRetries < 0) {
+      throw new TypeError('maxRetries must be a whole number of 0 or more')
+    }
+    this.#sleep = optionalFunction(options.sleep, 'sleep') ?? delay
+    this.#random = optionalFunction(options.random, 'random') ?? Math.random
 
     const fetchImpl = options.fetch ?? globalThis.fetch
     if (typeof fetchImpl !== 'function') {
@@ -180,7 +218,8 @@ export class DominaiteClient {
    */
   async ping(): Promise<Ping> {
     // GET signs an EMPTY idempotency key and an EMPTY body.
-    const response = (await this.#request('GET', PING_PATH, null, '')) as unknown as Ping
+    const reply = await this.#request('GET', PING_PATH, null, '')
+    const response = withMeta(reply.payload as unknown as Ping, reply)
     const skew = Number(response.clockSkewSeconds)
     if (Number.isFinite(skew) && Math.abs(skew) > CLOCK_SKEW_WARNING_SECONDS) {
       this.#warn(
@@ -203,7 +242,7 @@ export class DominaiteClient {
     // does not check the signature, but sending it costs nothing.
     const reply = await this.#send('GET', INTEGRATION_CONTRACT_PATH, null, '')
     const data = readObject(reply, 'contract')
-    return { ...data, version: stringOr(data['version'], '') }
+    return withMeta({ ...data, version: stringOr(data['version'], '') }, reply)
   }
 
   /**
@@ -228,27 +267,48 @@ export class DominaiteClient {
    * WITH the same idempotencyKey).
    */
   async createCheckoutSession(params: CreateCheckoutSessionParams): Promise<CheckoutSession> {
+    return this.#createCheckoutSession(params, {})
+  }
+
+  async #createCheckoutSession(params: CreateCheckoutSessionParams, options: SendOptions): Promise<CheckoutSession> {
     const { idempotencyKey, body } = this.#prepareSessionRequest(params)
-    const response = await this.#request('POST', SESSIONS_PATH, body, idempotencyKey)
+    const reply = await this.#send('POST', SESSIONS_PATH, body, idempotencyKey, options)
+    if (reply.status >= 400) {
+      throw rejection(reply)
+    }
+    const response = reply.payload
 
     if (response['success'] !== true || typeof response['checkout'] !== 'object' || response['checkout'] === null) {
+      const errorCode = typeof response['errorCode'] === 'string' ? response['errorCode'] : 'UNKNOWN'
+      const errorMessage =
+        typeof response['errorMessage'] === 'string' ? response['errorMessage'] : 'The checkout session was refused.'
+      // A storefront-bound key replayed for another storefront is refused at HTTP 200. It is
+      // the same configuration problem as the 400, so it gets the same error.
+      if (isStorefrontErrorCode(errorCode)) {
+        throw withRequestId(new StorefrontError(reply.status, errorCode, errorMessage, reply.envelope), reply.requestId)
+      }
       // A replay refusal names the transaction your key collided with. Carry it (and
       // the whole payload) so the caller can reconcile with getStatus() instead of
       // minting a second payment for the same order.
-      throw new CheckoutRefusedError(
-        typeof response['errorCode'] === 'string' ? response['errorCode'] : 'UNKNOWN',
-        typeof response['errorMessage'] === 'string'
-          ? response['errorMessage']
-          : 'The checkout session was refused.',
-        typeof response['transactionId'] === 'string' ? response['transactionId'] : undefined,
-        response,
+      throw withRequestId(
+        new CheckoutRefusedError(
+          errorCode,
+          errorMessage,
+          typeof response['transactionId'] === 'string' ? response['transactionId'] : undefined,
+          response,
+        ),
+        reply.requestId,
       )
     }
 
-    return response['checkout'] as CheckoutSession
+    return withMeta(response['checkout'] as CheckoutSession, reply)
   }
 
   /**
+   * @deprecated createCheckoutSession() retries by itself now, with the client's maxRetries.
+   * This stays as a thin wrapper: it runs createCheckoutSession() with `attempts` (total,
+   * default 3) and `baseDelayMs` (default 500) for this one call, and warns on each retry.
+   *
    * createCheckoutSession with retries on TransportError and on PAYMENT_PROCESSING_UNAVAILABLE,
    * sending your idempotency key unchanged on every attempt - which is what makes the retry
    * safe: the API never opens a second payment for a key it has already seen.
@@ -274,35 +334,20 @@ export class DominaiteClient {
     options: RetryOptions = {},
   ): Promise<CheckoutSession> {
     const attempts = options.attempts ?? 3
-    const baseDelayMs = options.baseDelayMs ?? 500
+    const baseDelayMs = options.baseDelayMs ?? RETRY_BASE_DELAY_MS
     if (!Number.isInteger(attempts) || attempts < 1) {
       throw new TypeError('attempts must be a positive integer')
     }
 
-    let lastError: TransportError | CheckoutRefusedError | undefined
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      try {
-        return await this.createCheckoutSession(params)
-      } catch (error) {
-        const retryable =
-          error instanceof TransportError ||
-          (error instanceof CheckoutRefusedError && error.errorCode === 'PAYMENT_PROCESSING_UNAVAILABLE')
-        if (!retryable) {
-          throw error
-        }
-        lastError = error
-        if (attempt < attempts - 1) {
-          const reason = error instanceof CheckoutRefusedError ? error.errorCode : error.name
-          this.#warn(
-            `dominaite-node: retrying createCheckoutSessionWithRetry after ${reason} (attempt ${attempt + 2} of ${attempts})`,
-            'DominaiteWarning',
-          )
-          await delay(baseDelayMs * 2 ** attempt)
-        }
-      }
-    }
-
-    throw lastError as TransportError | CheckoutRefusedError
+    return this.#createCheckoutSession(params, {
+      maxRetries: attempts - 1,
+      baseDelayMs,
+      onRetry: (reason, attempt) =>
+        this.#warn(
+          `dominaite-node: retrying createCheckoutSessionWithRetry after ${reason} (attempt ${attempt} of ${attempts})`,
+          'DominaiteWarning',
+        ),
+    })
   }
 
   /**
@@ -323,7 +368,7 @@ export class DominaiteClient {
    * should make you keep polling, never silently close an order that is still live.
    *
    * Poll after the payer returns to you, or on your order timeout - not in a tight loop;
-   * the endpoint is rate limited per key (60/min/key, 120/min/IP) and going over throws
+   * the endpoint is rate limited (120 per minute per key, 240 per minute per IP) and going over throws
    * RateLimitError.
    */
   async getStatus(transactionId: string): Promise<CheckoutStatus> {
@@ -333,15 +378,16 @@ export class DominaiteClient {
     }
 
     // GET signs an EMPTY idempotency key and an EMPTY body.
-    const response = await this.#request('GET', `${SESSIONS_PATH}/${normalized}`, null, '')
+    const reply = await this.#request('GET', `${SESSIONS_PATH}/${normalized}`, null, '')
+    const response = reply.payload
     // Passed through as sent, except the card on file: the gateway omits its null fields
     // on the wire, and the caller gets one shape for it, not two. When the gateway sent no
     // storedPaymentMethod at all there is no key here either (there is no card).
     const stored = response['storedPaymentMethod']
     if (isPlainObject(stored)) {
-      return { ...response, storedPaymentMethod: toStoredPaymentMethod(stored) } as CheckoutStatus
+      return withMeta({ ...response, storedPaymentMethod: toStoredPaymentMethod(stored) } as CheckoutStatus, reply)
     }
-    return response as CheckoutStatus
+    return withMeta(response as CheckoutStatus, reply)
   }
 
   /**
@@ -363,17 +409,19 @@ export class DominaiteClient {
    * payment, and getStatus(charge.transactionId) carries the latest class. Never read null
    * as hard. 'pending' is not terminal - poll getStatus(charge.transactionId).
    *
-   * Throws ChargeError when the gateway answered with a code instead of a charge:
-   * CHARGE_OUTCOME_UNKNOWN (502, the charge MAY have happened - poll
-   * error.charge.transactionId, never retry under a new key), CHARGE_FAILED (502, nothing
-   * charged), PAYMENT_METHOD_NOT_ACTIVE or DUPLICATE_REQUEST (409), IDEMPOTENCY_KEY_REUSED
-   * (422), PAYMENT_PROCESSING_UNAVAILABLE (503, retry later with the same key) or
+   * Throws ChargeError when the gateway answered with a code instead of a charge (the full
+   * list is CHARGE_ERROR_CODES): CHARGE_OUTCOME_UNKNOWN (502, the charge MAY have happened -
+   * poll error.charge.transactionId, never retry under a new key), CHARGE_FAILED (502,
+   * nothing charged), PAYMENT_METHOD_NOT_FOUND or AGREEMENT_NOT_FOUND (404),
+   * PAYMENT_METHOD_NOT_ACTIVE, CHARGE_IN_PROGRESS or DUPLICATE_REQUEST (409),
+   * IDEMPOTENCY_KEY_REUSED or an agreement term the charge breaks (422),
+   * PAYMENT_PROCESSING_UNAVAILABLE (503, retry later with the same key) or
    * PAYMENT_METHOD_CHARGES_DISABLED (503). If we never switched stored-card charges on for
    * your account, a retry on PAYMENT_METHOD_CHARGES_DISABLED does not help: ask us. If they
    * are on, retry later with the same key. A storefront refusal is a StorefrontError, as on
-   * sessions. Otherwise AuthenticationError, RateLimitError, ApiError
-   * (404 for an id that is not yours, 400 validation) or TransportError (network - safe
-   * to retry with the same key).
+   * sessions. Otherwise AuthenticationError, RateLimitError, ApiError (400 validation, or a
+   * 404 without a code) or TransportError (network, or a 5xx such as INTERNAL_ERROR that is
+   * not a charge code - safe to retry with the same key).
    */
   async chargePaymentMethod(
     paymentMethodId: string,
@@ -381,7 +429,11 @@ export class DominaiteClient {
   ): Promise<PaymentMethodCharge> {
     const id = normalizePaymentMethodId(paymentMethodId)
     const { idempotencyKey, body } = this.#prepareChargeRequest(params)
-    const reply = await this.#send('POST', `${PAYMENT_METHODS_PATH}/${id}/charges`, body, idempotencyKey)
+    // A charge code on a 5xx is the charge's own answer, not the API being down: only
+    // PAYMENT_PROCESSING_UNAVAILABLE among them is retried.
+    const reply = await this.#send('POST', `${PAYMENT_METHODS_PATH}/${id}/charges`, body, idempotencyKey, {
+      ownCodes: CHARGE_ERROR_CODES,
+    })
 
     const data = isPlainObject(reply.envelope['data']) ? reply.envelope['data'] : undefined
     const charge = data !== undefined && typeof data['chargeId'] === 'string' ? toCharge(data) : undefined
@@ -391,27 +443,31 @@ export class DominaiteClient {
     // provider declined; the envelope says success=false but the charge is right there,
     // status 'failed' with its decline class, so it is a result, not an exception.
     if (charge !== undefined && (reply.envelope['success'] === true || reply.status === 402)) {
-      return charge
+      return withMeta(charge, reply)
     }
 
     if (
       errorCode !== '' &&
       reply.status >= 400 &&
-      !GENERIC_FAILURE_STATUSES.has(reply.status) &&
-      !isStorefrontErrorCode(errorCode)
+      !GENERIC_CHARGE_FAILURE_STATUSES.has(reply.status) &&
+      !isStorefrontErrorCode(errorCode) &&
+      !(reply.status >= 500 && isGenericServerCode(errorCode, CHARGE_ERROR_CODES))
     ) {
-      throw new ChargeError(
-        reply.status,
-        errorCode,
-        stringOr(reply.error['message'], 'The charge was refused.'),
-        charge,
-        reply.envelope,
+      throw withRequestId(
+        new ChargeError(
+          reply.status,
+          errorCode,
+          stringOr(reply.error['message'], 'The charge was refused.'),
+          charge,
+          reply.envelope,
+        ),
+        reply.requestId,
       )
     }
     if (reply.status >= 400) {
       throw rejection(reply)
     }
-    throw new ApiError(reply.status, 'The API answered the charge without a charge body')
+    throw withRequestId(new ApiError(reply.status, 'The API answered the charge without a charge body'), reply.requestId)
   }
 
   /**
@@ -423,8 +479,8 @@ export class DominaiteClient {
    * Throws RevokeError when the gateway refused and nothing changed:
    * MERCHANT_API_UNAVAILABLE (503, retry later) or UPSTREAM_CONTRACT_ERROR (502, the
    * provider refused for good - contact support with the id). An id that is not yours
-   * throws an ApiError with httpStatus 404. Not a payment operation: no idempotency key
-   * is signed.
+   * throws an ApiError with httpStatus 404. Any other 5xx (INTERNAL_ERROR, for example) is a
+   * TransportError with the code kept. Not a payment operation: no idempotency key is signed.
    */
   async revokePaymentMethod(paymentMethodId: string): Promise<void> {
     const id = normalizePaymentMethodId(paymentMethodId)
@@ -435,12 +491,14 @@ export class DominaiteClient {
     }
 
     const errorCode = stringOr(reply.error['code'], '')
-    if (errorCode !== '' && !GENERIC_FAILURE_STATUSES.has(reply.status)) {
-      throw new RevokeError(
-        reply.status,
-        errorCode,
-        stringOr(reply.error['message'], 'The revoke was refused.'),
-        reply.envelope,
+    if (
+      errorCode !== '' &&
+      !GENERIC_REVOKE_FAILURE_STATUSES.has(reply.status) &&
+      !(reply.status >= 500 && isGenericServerCode(errorCode, REVOKE_ERROR_CODES))
+    ) {
+      throw withRequestId(
+        new RevokeError(reply.status, errorCode, stringOr(reply.error['message'], 'The revoke was refused.'), reply.envelope),
+        reply.requestId,
       )
     }
     throw rejection(reply)
@@ -506,14 +564,14 @@ export class DominaiteClient {
     const reply = await this.#send('GET', `${PAYMENTS_PATH}/${id}/refunds`, null, '')
     const data = reply.envelope['data']
     if (reply.status < 300 && isPlainObject(data) && Array.isArray(data['refunds'])) {
-      return {
+      return withMeta({
         ...data,
         transactionId: stringOr(data['transactionId'], ''),
         currency: stringOr(data['currency'], ''),
         refundedAmount: typeof data['refundedAmount'] === 'number' ? data['refundedAmount'] : 0,
         refundableAmount: typeof data['refundableAmount'] === 'number' ? data['refundableAmount'] : 0,
         refunds: data['refunds'].filter(isPlainObject).map(toRefund),
-      }
+      }, reply)
     }
     throw refundFailure(reply, 'The API answered the refund list without a list body')
   }
@@ -531,7 +589,7 @@ export class DominaiteClient {
   async createPlan(params: CreatePlanParams): Promise<Plan> {
     const { idempotencyKey, body } = prepareKeyedBody(params)
     const reply = await this.#send('POST', PLANS_PATH, body, idempotencyKey)
-    return toPlan(readObject(reply, 'plan'))
+    return withMeta(toPlan(readObject(reply, 'plan')), reply)
   }
 
   /**
@@ -543,7 +601,7 @@ export class DominaiteClient {
   async listPlans(): Promise<Plan[]> {
     // GET signs an EMPTY idempotency key and an EMPTY body.
     const reply = await this.#send('GET', PLANS_PATH, null, '')
-    return readArray(reply, 'plan list').map(toPlan)
+    return readArray(reply, 'plan list').map((plan) => withMeta(toPlan(plan), reply))
   }
 
   /**
@@ -556,7 +614,7 @@ export class DominaiteClient {
   async getPlan(planId: string): Promise<Plan> {
     const id = normalizeHandle(planId, 'planId', 'the plan_ id returned by createPlan()')
     const reply = await this.#send('GET', `${PLANS_PATH}/${id}`, null, '')
-    return toPlan(readObject(reply, 'plan'))
+    return withMeta(toPlan(readObject(reply, 'plan')), reply)
   }
 
   /**
@@ -580,7 +638,7 @@ export class DominaiteClient {
     // No key signs an EMPTY key and sends no Idempotency-Key header.
     const idempotencyKey = providedKey === undefined || providedKey === null ? '' : normalizeIdempotencyKey(providedKey)
     const reply = await this.#send('PATCH', `${PLANS_PATH}/${id}`, encodeBody(bodyParams), idempotencyKey)
-    return toPlan(readObject(reply, 'plan'))
+    return withMeta(toPlan(readObject(reply, 'plan')), reply)
   }
 
   /**
@@ -617,7 +675,7 @@ export class DominaiteClient {
   async createAgreement(params: CreateAgreementParams): Promise<Agreement> {
     const { idempotencyKey, body } = prepareKeyedBody(params)
     const reply = await this.#send('POST', AGREEMENTS_PATH, body, idempotencyKey)
-    return toAgreement(readObject(reply, 'agreement'))
+    return withMeta(toAgreement(readObject(reply, 'agreement')), reply)
   }
 
   /**
@@ -631,7 +689,7 @@ export class DominaiteClient {
   async getAgreement(agreementId: string): Promise<Agreement> {
     const id = normalizeHandle(agreementId, 'agreementId', 'the agr_ id returned by createAgreement()')
     const reply = await this.#send('GET', `${AGREEMENTS_PATH}/${id}`, null, '')
-    return toAgreement(readObject(reply, 'agreement'))
+    return withMeta(toAgreement(readObject(reply, 'agreement')), reply)
   }
 
   /**
@@ -658,9 +716,11 @@ export class DominaiteClient {
    *
    * The answer carries the whsec_ secret ONCE. Store it at once: a repeat with the same
    * idempotencyKey answers the same endpoint with secret null, and no other route shows
-   * it. A create that got no answer, a timeout or a 5xx may still have registered the
-   * endpoint, so repeat it with the SAME key: that replaces the unanswered endpoint and
-   * answers a fresh id and secret.
+   * it. For that reason the client sends this call once and never retries it, whatever
+   * maxRetries says: a retry after an answer that was lost on the way would come back
+   * with secret null. A create that got no answer, a timeout or a 5xx may still have
+   * registered the endpoint, so repeat it with the SAME key. If that answer has no secret,
+   * delete that endpoint and create it again with a NEW key.
    *
    * Throws ApiError: WEBHOOK_URL_REJECTED (400) for a URL that is not HTTPS on a public
    * host; WEBHOOK_LIMIT_REACHED (409) at 25 active endpoints; WEBHOOK_ALREADY_REGISTERED
@@ -672,9 +732,10 @@ export class DominaiteClient {
    */
   async createWebhookEndpoint(params: CreateWebhookEndpointParams): Promise<CreatedWebhookEndpoint> {
     const { idempotencyKey, body } = prepareKeyedBody(params)
-    const reply = await this.#send('POST', WEBHOOKS_PATH, body, idempotencyKey)
+    // Never retried: a replay answers secret null, so a retry would lose the secret.
+    const reply = await this.#send('POST', WEBHOOKS_PATH, body, idempotencyKey, { maxRetries: 0 })
     const data = readObject(reply, 'webhook endpoint')
-    return { ...toWebhookEndpoint(data), secret: stringOrNull(data['secret']) }
+    return withMeta({ ...toWebhookEndpoint(data), secret: stringOrNull(data['secret']) }, reply)
   }
 
   /**
@@ -688,7 +749,7 @@ export class DominaiteClient {
   async listWebhookEndpoints(): Promise<WebhookEndpoint[]> {
     // GET signs an EMPTY idempotency key and an EMPTY body.
     const reply = await this.#send('GET', WEBHOOKS_PATH, null, '')
-    return readArray(reply, 'webhook endpoint list').map(toWebhookEndpoint)
+    return readArray(reply, 'webhook endpoint list').map((endpoint) => withMeta(toWebhookEndpoint(endpoint), reply))
   }
 
   /**
@@ -740,14 +801,17 @@ export class DominaiteClient {
   async listTransactions(params: ListTransactionsParams): Promise<TransactionPage> {
     const query = transactionQuery(params)
     // GET signs the path WITHOUT the query string, an EMPTY idempotency key and an EMPTY body.
-    const reply = await this.#send('GET', TRANSACTIONS_PATH, null, '', query)
+    const reply = await this.#send('GET', TRANSACTIONS_PATH, null, '', { query })
     const data = readObject(reply, 'transaction page')
     const items = data['items']
-    return {
-      ...data,
-      items: Array.isArray(items) ? items.filter(isPlainObject).map(toTransaction) : [],
-      nextCursor: stringOrNull(data['nextCursor']),
-    }
+    return withMeta(
+      {
+        ...data,
+        items: Array.isArray(items) ? items.filter(isPlainObject).map(toTransaction) : [],
+        nextCursor: stringOrNull(data['nextCursor']),
+      },
+      reply,
+    )
   }
 
   #prepareSessionRequest(params: CreateCheckoutSessionParams): { idempotencyKey: string; body: string } {
@@ -798,12 +862,48 @@ export class DominaiteClient {
     path: string,
     body: string | null,
     idempotencyKey: string,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<Reply> {
     const reply = await this.#send(method, path, body, idempotencyKey)
     if (reply.status >= 400) {
       throw rejection(reply)
     }
-    return reply.payload
+    return reply
+  }
+
+  /**
+   * Sends one call, with the client's retry policy. A GET, and a POST that carries an
+   * idempotency key, are retried on a transport failure, a 5xx the route does not own, and
+   * PAYMENT_PROCESSING_UNAVAILABLE. Every attempt sends the same path, key and body bytes;
+   * only the timestamp, and so the signature, is fresh. A 429 is never retried. The last
+   * attempt's answer or error is what the caller gets.
+   */
+  async #send(
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    path: string,
+    body: string | null,
+    idempotencyKey: string,
+    options: SendOptions = {},
+  ): Promise<Reply> {
+    const safeToRepeat = method === 'GET' || (method === 'POST' && idempotencyKey !== '')
+    const maxRetries = safeToRepeat ? (options.maxRetries ?? this.#maxRetries) : 0
+    const baseDelayMs = options.baseDelayMs ?? RETRY_BASE_DELAY_MS
+    for (let attempt = 0; ; attempt++) {
+      let reason: string | null
+      try {
+        const reply = await this.#sendOnce(method, path, body, idempotencyKey, options.query ?? '', attempt)
+        reason = attempt < maxRetries ? retryReason(reply, options.ownCodes ?? []) : null
+        if (reason === null) {
+          return reply
+        }
+      } catch (error) {
+        if (attempt >= maxRetries || !(error instanceof TransportError) || error instanceof OversizedBodyError) {
+          throw error
+        }
+        reason = error.name
+      }
+      options.onRetry?.(reason, attempt + 2)
+      await this.#sleep(retryDelayMs(attempt, baseDelayMs, this.#random))
+    }
   }
 
   /**
@@ -812,17 +912,20 @@ export class DominaiteClient {
    * mean the same thing on every route. Any other status comes back parsed, so a route
    * can read the code and the data the gateway attached before deciding what it is.
    */
-  async #send(
+  async #sendOnce(
     method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     path: string,
     body: string | null,
     idempotencyKey: string,
-    query = '',
+    query: string,
+    attempt: number,
   ): Promise<Reply> {
     const started = performance.now()
     const outcome: Outcome = { status: 'error', requestId: null }
     try {
       return await this.#exchange(method, path, body, idempotencyKey, query, outcome)
+    } catch (error) {
+      throw withRequestId(error, outcome.requestId === '' ? null : outcome.requestId)
     } finally {
       if (this.#onDebug !== undefined) {
         // The signed path only: no query string, no base URL, no body, no signature.
@@ -832,6 +935,9 @@ export class DominaiteClient {
         }
         if (idempotencyKey !== '') {
           line += ` idempotency_key=${idempotencyKey}`
+        }
+        if (attempt > 0) {
+          line += ` retry=${attempt}`
         }
         callSafely(this.#onDebug, line)
       }
@@ -907,7 +1013,7 @@ export class DominaiteClient {
 
     // 204 carries nothing to parse; the status is the whole answer.
     if (response.status === 204) {
-      return { status: 204, envelope: {}, payload: {}, error: {} }
+      return { status: 204, requestId: outcome.requestId || null, envelope: {}, payload: {}, error: {} }
     }
 
     let raw: string
@@ -924,10 +1030,10 @@ export class DominaiteClient {
     try {
       decoded = JSON.parse(raw)
     } catch {
-      throw new ApiError(response.status, 'The API returned a non-JSON response')
+      throw nonJson(response.status)
     }
     if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) {
-      throw new ApiError(response.status, 'The API returned a non-JSON response')
+      throw nonJson(response.status)
     }
 
     // The gateway wraps responses as { success, data, ... }; unwrap when present.
@@ -935,6 +1041,12 @@ export class DominaiteClient {
     const envelope = decoded as Record<string, unknown>
     const payload = isPlainObject(envelope['data']) ? envelope['data'] : envelope
     const envelopeError = isPlainObject(envelope['error']) ? envelope['error'] : {}
+    // The header wins; an API that does not send it yet still has the id in the body.
+    if (!outcome.requestId) {
+      const metadata = envelope['metadata']
+      outcome.requestId = isPlainObject(metadata) ? cleanHeader(asString(metadata['requestId']), MAX_REQUEST_ID_LENGTH) : null
+    }
+    const requestId = outcome.requestId || null
 
     if (response.status === 401 || response.status === 403) {
       const errorCode = stringOr(payload['errorCode'], stringOr(envelopeError['code'], 'UNAUTHORIZED'))
@@ -961,7 +1073,7 @@ export class DominaiteClient {
       )
     }
 
-    return { status: response.status, envelope, payload, error: envelopeError }
+    return { status: response.status, requestId, envelope, payload, error: envelopeError }
   }
 
   /** Warns once per distinct Dominaite-Sdk-Notice value. A missing header does nothing. */
@@ -990,6 +1102,53 @@ export class DominaiteClient {
       // A warning must never fail the request (for example under --throw-deprecation).
     }
   }
+}
+
+/** Per-call settings for #send. */
+interface SendOptions {
+  /** The query string, appended to the URL and never signed. */
+  query?: string
+  /** Codes this route answers on a 5xx as its own refusal: not retried, except PAYMENT_PROCESSING_UNAVAILABLE. */
+  ownCodes?: readonly string[]
+  /** Overrides the client's maxRetries for this call. */
+  maxRetries?: number
+  /** Overrides the base delay for this call. */
+  baseDelayMs?: number
+  /** Called before each retry with the reason and the number of the attempt about to run. */
+  onRetry?: (reason: string, attempt: number) => void
+}
+
+/**
+ * Why a parsed reply is worth another attempt, or null when it is not: a 5xx the route does
+ * not own, or PAYMENT_PROCESSING_UNAVAILABLE in either place the API puts it.
+ */
+function retryReason(reply: Reply, ownCodes: readonly string[]): string | null {
+  const refusalCode = stringOr(reply.payload['errorCode'], '')
+  const errorCode = stringOr(reply.error['code'], '')
+  if (refusalCode === PAYMENT_PROCESSING_UNAVAILABLE || errorCode === PAYMENT_PROCESSING_UNAVAILABLE) {
+    return PAYMENT_PROCESSING_UNAVAILABLE
+  }
+  if (reply.status >= 500 && !ownCodes.includes(errorCode)) {
+    return errorCode === '' ? `HTTP ${reply.status}` : errorCode
+  }
+  return null
+}
+
+/** Full jitter: a random wait between 0 and base * 2^attempt, capped at RETRY_MAX_DELAY_MS. */
+function retryDelayMs(attempt: number, baseDelayMs: number, random: () => number): number {
+  const ceiling = Math.min(RETRY_MAX_DELAY_MS, baseDelayMs * 2 ** attempt)
+  return Math.floor(random() * ceiling)
+}
+
+/** A body that is not a JSON object: a 5xx is a proxy or the API failing, anything else unexpected. */
+function nonJson(status: number): DominaiteError {
+  if (status >= 500) {
+    return new TransportError(
+      `The Dominaite API is unavailable (HTTP ${status}, not a JSON answer); retry with the same idempotency key.`,
+      { httpStatus: status },
+    )
+  }
+  return new ApiError(status, 'The API returned a non-JSON response')
 }
 
 /** What #send learns from the response, for the debug line. */
@@ -1042,6 +1201,17 @@ function cleanHeader(value: string | null | undefined, max: number): string | nu
   return value.slice(0, max).replace(/[\u0000-\u001f\u007f]/g, '').trim()
 }
 
+/** An injected function, or undefined when not set. */
+function optionalFunction<T extends (...args: never[]) => unknown>(value: T | undefined | null, name: string): T | undefined {
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  if (typeof value !== 'function') {
+    throw new TypeError(`${name} must be a function`)
+  }
+  return value
+}
+
 /** A caller's hook: a function, or undefined when not set. */
 function optionalCallback<T extends (value: string) => void>(value: T | undefined | null, name: string): T | undefined {
   if (value === undefined || value === null) {
@@ -1088,21 +1258,29 @@ function accessDeniedMessage(httpStatus: number, errorCode: string, apiMessage: 
   return `Access denied (HTTP 403 ${errorCode}): this API key may not call this route.`
 }
 
-/** The generic reading of a failed reply: 5xx is the API being unavailable, 4xx a rejection. */
+/**
+ * The generic reading of a failed reply: 5xx is the API being unavailable, 4xx a rejection.
+ * Either way the code the API sent stays on the error.
+ */
 function rejection(reply: Reply): DominaiteError {
-  if (reply.status >= 500) {
-    return new TransportError(
-      `The Dominaite API is unavailable (HTTP ${reply.status}); retry with the same idempotency key.`,
-    )
-  }
   // Carry the machine-readable code: a validation rejection like
   // IDEMPOTENCY_KEY_REQUIRED is only actionable if the caller can branch on it.
   const errorCode = stringOr(reply.payload['errorCode'], stringOr(reply.error['code'], ''))
+  if (reply.status >= 500) {
+    return withRequestId(new TransportError(
+      `The Dominaite API is unavailable (HTTP ${reply.status}${errorCode === '' ? '' : ` ${errorCode}`}); ` +
+        'retry with the same idempotency key.',
+      { httpStatus: reply.status, errorCode: errorCode === '' ? undefined : errorCode, result: reply.envelope },
+    ), reply.requestId)
+  }
   const message = stringOr(reply.payload['errorMessage'], stringOr(reply.error['message'], 'Request rejected'))
   if (isStorefrontErrorCode(errorCode)) {
-    return new StorefrontError(reply.status, errorCode, message, reply.envelope)
+    return withRequestId(new StorefrontError(reply.status, errorCode, message, reply.envelope), reply.requestId)
   }
-  return new ApiError(reply.status, message, errorCode === '' ? undefined : errorCode, reply.envelope)
+  return withRequestId(
+    new ApiError(reply.status, message, errorCode === '' ? undefined : errorCode, reply.envelope),
+    reply.requestId,
+  )
 }
 
 /**
@@ -1112,7 +1290,7 @@ function rejection(reply: Reply): DominaiteError {
 function readRefund(reply: Reply): Refund {
   const data = reply.envelope['data']
   if (reply.status < 300 && isPlainObject(data) && typeof data['refundId'] === 'string') {
-    return toRefund(data)
+    return withMeta(toRefund(data), reply)
   }
 
   throw refundFailure(reply, 'The API answered the refund without a refund body')
@@ -1122,17 +1300,15 @@ function readRefund(reply: Reply): Refund {
 function refundFailure(reply: Reply, noBodyMessage: string): DominaiteError {
   const errorCode = stringOr(reply.error['code'], '')
   if (reply.status >= 400 && reply.status < 500 && isRefundErrorCode(errorCode)) {
-    return new RefundError(
-      reply.status,
-      errorCode,
-      stringOr(reply.error['message'], 'The refund was refused.'),
-      reply.envelope,
+    return withRequestId(
+      new RefundError(reply.status, errorCode, stringOr(reply.error['message'], 'The refund was refused.'), reply.envelope),
+      reply.requestId,
     )
   }
   if (reply.status >= 400) {
     return rejection(reply)
   }
-  return new ApiError(reply.status, noBodyMessage, undefined, reply.envelope)
+  return withRequestId(new ApiError(reply.status, noBodyMessage, undefined, reply.envelope), reply.requestId)
 }
 
 function isRefundErrorCode(code: string): code is RefundErrorCode {
@@ -1160,6 +1336,11 @@ function toRefund(data: Record<string, unknown>): Refund {
 /** Storefront refusals keep their own error on sessions and charges alike. */
 function isStorefrontErrorCode(code: string): code is StorefrontErrorCode {
   return (STOREFRONT_ERROR_CODES as readonly string[]).includes(code)
+}
+
+/** A generic server code the route does not document as its own. */
+function isGenericServerCode(code: string, routeCodes: readonly string[]): boolean {
+  return GENERIC_SERVER_ERROR_CODES.has(code) && !routeCodes.includes(code)
 }
 
 /**
@@ -1221,6 +1402,9 @@ function validateMoneyParams(
     )
   }
 
+  if (typeof params.currency !== 'string' || !CURRENCY_PATTERN.test(params.currency)) {
+    throw new TypeError('currency must be a three-letter uppercase ISO 4217 code, e.g. EUR')
+  }
   if (typeof params.orderReference !== 'string' || params.orderReference === '') {
     throw new TypeError('orderReference must be a non-empty string')
   }
@@ -1249,7 +1433,10 @@ function readObject(reply: Reply, what: string): Record<string, unknown> {
   if (reply.status >= 400) {
     throw rejection(reply)
   }
-  throw new ApiError(reply.status, `The API answered without a ${what} body`, undefined, reply.envelope)
+  throw withRequestId(
+    new ApiError(reply.status, `The API answered without a ${what} body`, undefined, reply.envelope),
+    reply.requestId,
+  )
 }
 
 /** The objects in envelope.data of a 2xx reply when it is an array; the rejection otherwise. */
@@ -1261,7 +1448,10 @@ function readArray(reply: Reply, what: string): Record<string, unknown>[] {
   if (reply.status >= 400) {
     throw rejection(reply)
   }
-  throw new ApiError(reply.status, `The API answered without a ${what}`, undefined, reply.envelope)
+  throw withRequestId(
+    new ApiError(reply.status, `The API answered without a ${what}`, undefined, reply.envelope),
+    reply.requestId,
+  )
 }
 
 function toPlan(data: Record<string, unknown>): Plan {
@@ -1405,7 +1595,8 @@ function normalizePaymentMethodId(paymentMethodId: unknown): string {
   if (!PAYMENT_METHOD_ID_PATTERN.test(normalized)) {
     throw new TypeError('paymentMethodId must be the id from getStatus().storedPaymentMethod')
   }
-  return normalized
+  // The API signs a pm_ id in lowercase, so an id typed in uppercase would fail the signature.
+  return STORED_PAYMENT_METHOD_ID_PATTERN.test(normalized) ? normalized.toLowerCase() : normalized
 }
 
 /** The payment id goes into the signed path in the lowercase hyphenated form the gateway signs. */
@@ -1541,8 +1732,19 @@ async function readBoundedText(response: Response): Promise<string> {
   return text + decoder.decode()
 }
 
+/**
+ * An answer that did arrive but was too large to read. Not retried: the API acted on the
+ * call, so a retry would only replay it. Callers see a plain TransportError.
+ */
+class OversizedBodyError extends TransportError {
+  constructor(message: string) {
+    super(message)
+    this.name = 'TransportError'
+  }
+}
+
 function oversizedBody(): TransportError {
-  return new TransportError(
+  return new OversizedBodyError(
     `The Dominaite API response exceeded the ${MAX_RESPONSE_BYTES} byte limit and was not read. ` +
       'Check your baseUrl and any proxy in front of it, then retry with the same idempotency key.',
   )
@@ -1562,6 +1764,19 @@ function parseRetryAfterSeconds(value: string | null | undefined): number | null
   }
   const seconds = Number(trimmed)
   return Number.isSafeInteger(seconds) ? seconds : null
+}
+
+/**
+ * Puts the reply's request id on a result as a read-only, non-enumerable requestId: it is
+ * there to read, and stays out of JSON.stringify, object spreads and deep equality.
+ */
+function withMeta<T extends object>(value: T, reply: Reply): T {
+  Object.defineProperty(value, 'requestId', { value: reply.requestId, enumerable: false, configurable: true })
+  return value
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -1,6 +1,7 @@
 export { DominaiteClient, PRODUCTION_BASE_URL, SANDBOX_BASE_URL } from './client.js'
 export {
   ApiError,
+  AUTH_ERROR_CODES,
   AUTHORIZATION_ERROR_CODES,
   AuthenticationError,
   CHARGE_ERROR_CODES,
@@ -8,7 +9,9 @@ export {
   CheckoutRefusedError,
   DominaiteError,
   ErrorCodes,
+  FIELD_ERROR_CODES,
   RateLimitError,
+  RECURRING_ERROR_CODES,
   REFUND_ERROR_CODES,
   REFUND_FAILURE_CODES,
   RefundError,
@@ -17,18 +20,24 @@ export {
   SESSION_REFUSAL_ERROR_CODES,
   STOREFRONT_ERROR_CODES,
   StorefrontError,
+  SUBSCRIPTION_REFUSAL_ERROR_CODES,
   TransportError,
   VALIDATION_ERROR_CODES,
+  WEBHOOK_ERROR_CODES,
 } from './errors.js'
 export type {
+  AuthErrorCode,
   AuthorizationErrorCode,
   ChargeErrorCode,
+  FieldErrorCode,
+  RecurringErrorCode,
   RefundErrorCode,
   RefundFailureCode,
   RevokeErrorCode,
   SessionRefusalErrorCode,
   StorefrontErrorCode,
   ValidationErrorCode,
+  WebhookErrorCode,
 } from './errors.js'
 export { orderIdempotencyKey } from './idempotency.js'
 export { CURRENCY_EXPONENTS, toMinorUnits } from './money.js'
@@ -93,6 +102,7 @@ export type {
   Refund,
   RefundList,
   RefundStatus,
+  ResponseMetadata,
   RetryOptions,
   StoredPaymentMethod,
   StoredPaymentMethodRetiredReason,

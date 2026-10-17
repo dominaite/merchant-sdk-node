@@ -45,8 +45,11 @@ function jsonResponse(status, body) {
   })
 }
 
+/** Retries run at once in tests; the retry tests check the waits themselves. */
+const noWait = async () => {}
+
 function makeClient(fetchImpl) {
-  return new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl })
+  return new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl, sleep: noWait })
 }
 
 const CHECKOUT = {
@@ -556,10 +559,11 @@ test('an oversized response body is a TransportError, and the read stops at the 
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     )
 
+  const client = new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl, maxRetries: 0 })
   await assert.rejects(
-    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    () => client.createCheckoutSession(SESSION_PARAMS),
     (error) => {
-      assert.ok(error instanceof TransportError, 'an oversized body is the retryable class')
+      assert.ok(error instanceof TransportError, 'an oversized body is a TransportError')
       assert.match(error.message, /exceeded/)
       return true
     },
@@ -1053,12 +1057,78 @@ test('a 5xx without a code on the charge route is still a TransportError', async
   await assert.rejects(makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS), TransportError)
 })
 
-test('a charge against a method that is not yours is an ApiError 404', async () => {
-  const { fetchImpl } = recordingFetch({ status: 404, body: { success: false, error: { code: 'PAYMENT_METHOD_NOT_FOUND', message: 'No stored payment method with this id.' } } })
+test('a coded charge 404 is a ChargeError, still caught as an ApiError', async () => {
+  for (const code of ['PAYMENT_METHOD_NOT_FOUND', 'AGREEMENT_NOT_FOUND']) {
+    const { fetchImpl } = recordingFetch({ status: 404, body: { success: false, error: { code, message: 'Not found.' } } })
+
+    await assert.rejects(
+      makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS),
+      (error) => error instanceof ChargeError && error instanceof ApiError && error.httpStatus === 404 && error.errorCode === code,
+      code,
+    )
+  }
+})
+
+test('a charge 404 without a code stays the generic ApiError', async () => {
+  const { fetchImpl } = recordingFetch({ status: 404, body: { success: false } })
 
   await assert.rejects(
     makeClient(fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS),
-    (error) => error instanceof ApiError && !(error instanceof ChargeError) && error.httpStatus === 404 && error.errorCode === 'PAYMENT_METHOD_NOT_FOUND',
+    (error) => error instanceof ApiError && !(error instanceof ChargeError) && error.httpStatus === 404,
+  )
+})
+
+test('a generic 5xx code on charge and revoke is a TransportError that keeps the code', async () => {
+  for (const [status, code] of [[500, 'INTERNAL_ERROR'], [503, 'SERVICE_UNAVAILABLE'], [503, 'MERCHANT_API_UNAVAILABLE']]) {
+    const body = { success: false, error: { code, message: 'An unexpected error occurred', statusCode: status } }
+    await assert.rejects(
+      makeClient(recordingFetch({ status, body }).fetchImpl).chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS),
+      (error) => error instanceof TransportError && !(error instanceof ChargeError) && error.httpStatus === status && error.errorCode === code,
+      `charge ${status} ${code}`,
+    )
+  }
+  for (const [status, code] of [[500, 'INTERNAL_ERROR'], [503, 'SERVICE_UNAVAILABLE']]) {
+    const body = { success: false, error: { code, message: 'An unexpected error occurred', statusCode: status } }
+    await assert.rejects(
+      makeClient(recordingFetch({ status, body }).fetchImpl).revokePaymentMethod(PAYMENT_METHOD_ID),
+      (error) => error instanceof TransportError && !(error instanceof RevokeError) && error.httpStatus === status && error.errorCode === code,
+      `revoke ${status} ${code}`,
+    )
+  }
+})
+
+test('a storefront mismatch refused at HTTP 200 on a checkout replay is a StorefrontError', async () => {
+  const refusal = {
+    success: true,
+    data: { success: false, errorCode: 'STOREFRONT_MISMATCH', errorMessage: 'This key is bound to another storefront.' },
+  }
+  await assert.rejects(
+    makeClient(recordingFetch({ status: 200, body: refusal }).fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    (error) => error instanceof StorefrontError
+      && !(error instanceof CheckoutRefusedError)
+      && error.errorCode === ErrorCodes.STOREFRONT_MISMATCH
+      && error.httpStatus === 200
+      && error.message === 'This key is bound to another storefront.',
+  )
+})
+
+test('an uppercase pm_ id is signed and sent in the lowercase form the API signs', async () => {
+  const upper = PAYMENT_METHOD_ID.replace(/^pm_/, 'PM_').toUpperCase()
+  const { fetchImpl, calls } = recordingFetch(placed())
+  await makeClient(fetchImpl).chargePaymentMethod(upper, CHARGE_PARAMS)
+  const path = `/merchant-api/payment-methods/${PAYMENT_METHOD_ID}/charges`
+  assert.equal(calls[0].url, BASE_URL + path)
+  const headers = calls[0].init.headers
+  assert.equal(
+    headers['X-Signature'],
+    signRequest({
+      secret: VECTOR.secret,
+      timestamp: headers['X-Timestamp'],
+      method: 'POST',
+      path,
+      idempotencyKey: CHARGE_PARAMS.idempotencyKey,
+      body: calls[0].init.body,
+    }),
   )
 })
 
@@ -1224,7 +1294,8 @@ test('ErrorCodes names each code as itself and cannot be changed at runtime', ()
   for (const [name, value] of Object.entries(ErrorCodes)) {
     assert.equal(value, name)
   }
-  assert.deepEqual(Object.keys(ErrorCodes).sort(), [
+  // These names shipped first and stay; error-codes.test.mjs pins the rest to the contract.
+  const shipped = [
     'ALREADY_PROCESSED',
     'CHARGE_DECLINE_RATE_EXCEEDED',
     'CHARGE_VELOCITY_EXCEEDED',
@@ -1243,7 +1314,10 @@ test('ErrorCodes names each code as itself and cannot be changed at runtime', ()
     'STOREFRONT_MISMATCH',
     'STOREFRONT_NOT_WHITELISTED',
     'VERIFY_ONLY_NOT_ENABLED',
-  ])
+  ]
+  for (const name of shipped) {
+    assert.equal(ErrorCodes[name], name)
+  }
   assert.ok(Object.isFrozen(ErrorCodes))
   // The replay and availability constants are the refusal codes a session actually raises.
   for (const code of ['ALREADY_PROCESSED', 'PRIOR_ATTEMPT_FAILED', 'DUPLICATE_REQUEST', 'PAYMENT_PROCESSING_UNAVAILABLE', 'IDEMPOTENCY_KEY_REUSED']) {

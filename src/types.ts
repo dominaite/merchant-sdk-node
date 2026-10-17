@@ -59,7 +59,7 @@ export interface CreateCheckoutSessionParams {
   country?: string
   /** ISO 639-1 widget UI language. */
   language?: string
-  theme?: 'light' | 'dark' | 'bright'
+  theme?: 'light' | 'dark' | 'bright' | (string & {})
   description?: string
   /**
    * The id (a UUID) of the storefront this payment belongs to. Leave it out and the
@@ -116,6 +116,32 @@ export interface CreateCheckoutSessionParams {
   /** Anything else the API accepts. */
   [key: string]: unknown
 }
+
+/**
+ * What every result of a client call carries besides its own fields. `requestId` is
+ * non-enumerable: read it directly, it stays out of JSON.stringify and object spreads.
+ */
+export interface ResponseMetadata {
+  /**
+   * The API's id for the request that returned this object: the Dominaite-Request-Id header,
+   * or metadata.requestId from the body when the header is absent. Quote it to Dominaite
+   * support. Null when the answer carried no id; absent on an object you built yourself.
+   */
+  readonly requestId?: string | null
+}
+
+// Every result carries the request id. Declared apart from each result's own fields.
+export interface CheckoutSession extends ResponseMetadata {}
+export interface CheckoutStatus extends ResponseMetadata {}
+export interface PaymentMethodCharge extends ResponseMetadata {}
+export interface Refund extends ResponseMetadata {}
+export interface RefundList extends ResponseMetadata {}
+export interface Plan extends ResponseMetadata {}
+export interface Agreement extends ResponseMetadata {}
+export interface WebhookEndpoint extends ResponseMetadata {}
+export interface TransactionPage extends ResponseMetadata {}
+export interface IntegrationContract extends ResponseMetadata {}
+export interface Ping extends ResponseMetadata {}
 
 /** What {@link DominaiteClient.createCheckoutSession} returns. */
 export interface CheckoutSession {
@@ -747,7 +773,8 @@ export interface CreatedWebhookEndpoint extends WebhookEndpoint {
   /**
    * The whsec_ signing secret for verifyWebhook(). Only the first answer carries it: a
    * repeat with the same key answers the same endpoint with secret null. Store it at once.
-   * No route shows it again; to replace a lost secret, delete the endpoint and create a new one.
+   * No route shows it again; to replace a lost secret, delete the endpoint and create it
+   * again with a new key.
    */
   secret: string | null
 }
@@ -893,9 +920,24 @@ export interface DominaiteClientOptions {
   onDebug?: (line: string) => void
   /** Injectable fetch, for tests or a proxy-aware implementation. Defaults to global fetch. */
   fetch?: typeof globalThis.fetch
+  /**
+   * How many times a failed call is sent again. Defaults to 2; 0 turns retries off. Only GET
+   * calls and POST calls that carry an idempotency key are retried, with the same key and
+   * the same body on every attempt. A retry follows a network failure, a timeout, a 5xx
+   * that is not the route's own answer, and PAYMENT_PROCESSING_UNAVAILABLE. A 429 is never
+   * retried. The wait before retry n is random between 0 and 500 ms * 2^(n-1), at most 8 s.
+   */
+  maxRetries?: number
+  /** Waits between retries. Defaults to a timer. For tests: inject one that resolves at once. */
+  sleep?: (ms: number) => Promise<void>
+  /** A number in [0, 1) that picks each retry wait. Defaults to Math.random. For tests. */
+  random?: () => number
 }
 
-/** Options for {@link DominaiteClient.createCheckoutSessionWithRetry}. */
+/**
+ * Options for {@link DominaiteClient.createCheckoutSessionWithRetry}.
+ * @deprecated Use the client's maxRetries option; createCheckoutSession() retries by itself.
+ */
 export interface RetryOptions {
   /** Total attempts including the first. Defaults to 3. */
   attempts?: number
@@ -931,12 +973,13 @@ export interface PaymentWebhookData {
   transactionId: string
   status: TransactionStatus | string
   previousStatus?: TransactionStatus | string | null
-  kind?: string
+  kind?: string | null
   /** What you are paid; on payment.refunded, what went back to the customer. */
   amount: number
   /** The card movement, surcharge included. */
-  grossAmount?: number
-  surchargeAmount?: number
+  grossAmount?: number | null
+  /** The surcharge the payer paid; null unless it is above 0. */
+  surchargeAmount?: number | null
   currency: string
   /** How the payer paid: 'card', 'wallet', ... Not the stored card; that is storedPaymentMethod. */
   paymentMethod?: string | null

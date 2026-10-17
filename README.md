@@ -240,11 +240,13 @@ Same API. Node's `require()` of this package resolves to the CJS build.
 |---|---|
 | `keyId`, `secret` | Required. Your API key id (`dmk_...`) and secret (`dms_...`). |
 | `baseUrl` | Required. `SANDBOX_BASE_URL` or `PRODUCTION_BASE_URL`, or your own value. Must be `https://`; plain `http://` only for localhost, 127.0.0.1 and ::1. |
-| `timeoutMs` | Per-request timeout. Defaults to 45000 (serverless cold starts can take 10+ s). |
+| `timeoutMs` | Timeout for one attempt. Defaults to 45000 (serverless cold starts can take 10+ s). With retries, one call can take up to `(maxRetries + 1) x timeoutMs`, plus the waits between attempts. |
 | `fetch` | Your own fetch, for a proxy or a test double. Defaults to the global fetch. |
 | `userAgent` | Your own identifier, for example `shop/1.2`. The SDK sends `dominaite-node/<version> (node <version>) shop/1.2`, which helps when support reads the access logs. A control character throws a `TypeError`. |
 | `onWarning` | Receives the SDK's warnings. See [Logging and warnings](#logging-and-warnings). |
 | `onDebug` | Turns on the debug log. See [Logging and warnings](#logging-and-warnings). |
+| `maxRetries` | How many times a failed call is sent again. Defaults to 2; `0` turns retries off. See [Retries and double-charges](#retries-and-double-charges). |
+| `sleep`, `random` | For tests: the wait between retries (defaults to a timer) and the number in [0, 1) that picks it (defaults to `Math.random`). |
 
 ## Logging and warnings
 
@@ -256,7 +258,7 @@ warning when:
   header on any response. You get one `DeprecationWarning` per distinct notice per client,
   for example `dominaite-node 0.6.0 is deprecated; upgrade to 0.7.0 (sunset 2027-01-31).`
   followed by the link from the notice;
-- `createCheckoutSessionWithRetry` retries after a failure;
+- the deprecated `createCheckoutSessionWithRetry` retries after a failure;
 - `ping()` sees a clock skew above 60 seconds. Requests fail at 300.
 
 The debug log is off by default. Pass `onDebug` to get one line per request:
@@ -273,8 +275,8 @@ const client = new DominaiteClient({
 ```
 
 A line holds the method, the signed path, the status (`error` when the request did not reach
-the API), the time in milliseconds, the `Dominaite-Request-Id` of the response and the
-idempotency key you sent. Give support the request id when you ask about a call. No warning
+the API), the time in milliseconds, the request id of the response and the idempotency key you
+sent. A retried attempt gets its own line, ending in `retry=<n>`. Give support the request id when you ask about a call. No warning
 and no debug line ever holds your secret, a signature, a `cashierToken`, a query string or a
 request or response body. A hook that throws is ignored, so logging cannot fail a payment
 call.
@@ -351,24 +353,48 @@ orderIdempotencyKey({ scope: 'checkout', orderId: 'order-1042', amountMinor: 250
 Retrying with the same key never opens a second payment - on a timeout, retry with the same key
 rather than generating a new one.
 
-`createCheckoutSessionWithRetry` does that for you: it sends your key unchanged on every attempt,
-retrying `TransportError` (network failures and 5xx, including `MERCHANT_API_UNAVAILABLE`) and
-`PAYMENT_PROCESSING_UNAVAILABLE`, whether it arrives as a 503 or as an HTTP 200 refusal. Other
-refusals and authentication failures are not retried - they will not change.
+The client does that for you. Every GET call, and every POST call that carries an idempotency
+key, is sent again after:
+
+- a network failure or a timeout (`TransportError`);
+- a 5xx, for example `INTERNAL_ERROR` or `MERCHANT_API_UNAVAILABLE`, or a 5xx page from a proxy;
+- `PAYMENT_PROCESSING_UNAVAILABLE`, whether it arrives as a 503 or as an HTTP 200 refusal.
+
+Every attempt sends the same path, the same idempotency key and the same body. Only the
+timestamp, and so the signature, is new. The wait before retry `n` is random between 0 and
+`500 ms * 2^(n-1)`, at most 8 seconds. When the retries run out, you get the last error as it
+arrived.
+
+`timeoutMs` applies to each attempt, not to the whole call. With the defaults (45 s, 2 retries)
+one call can take up to 3 x 45 s, plus the waits between attempts.
 
 ```js
-const session = await client.createCheckoutSessionWithRetry(
-  {
-    amount: 2500,
-    currency: 'EUR',
-    orderReference: 'order-1042',
-    idempotencyKey: orderIdempotencyKey({
-      scope: 'checkout', orderId: 'order-1042', amountMinor: 2500, currency: 'EUR',
-    }),
-  },
-  { attempts: 3, baseDelayMs: 500 },   // both optional; delay doubles per attempt
-)
+const client = new DominaiteClient({
+  keyId: process.env.DOMINAITE_KEY_ID,
+  secret: process.env.DOMINAITE_SECRET,
+  baseUrl: process.env.DOMINAITE_BASE_URL,
+  maxRetries: 2,   // the default; 0 turns retries off
+})
 ```
+
+What the client does not retry:
+
+- **A 429.** Retrying into a limiter that just said stop makes it worse. You get a
+  `RateLimitError` with `retryAfterSeconds`: wait that long, then send the call again with the
+  same key.
+- **A charge's own answer on a 5xx.** `CHARGE_OUTCOME_UNKNOWN`, `CHARGE_FAILED` and
+  `PAYMENT_METHOD_CHARGES_DISABLED` arrive as `ChargeError` at once. Only
+  `PAYMENT_PROCESSING_UNAVAILABLE` on a charge is retried.
+- **`createWebhookEndpoint`.** The API returns the signing secret only on the first answer. A
+  retry after an answer that was lost on the way would come back with `secret: null`.
+- **A response body over 10MB.** The API did answer, so a retry would only replay it.
+- **DELETE and PATCH calls** (`revokePaymentMethod`, `deletePlan`, `cancelAgreement`,
+  `deleteWebhookEndpoint`, `updatePlan`). They carry no idempotency key.
+- **Refusals, validation and authentication failures.** They will not change.
+
+`createCheckoutSessionWithRetry(params, { attempts, baseDelayMs })` is deprecated. It still works:
+it runs one `createCheckoutSession` with its own `attempts` (total, default 3) in place of the
+client's `maxRetries`, and warns on each retry.
 
 What a retry (or a page reload) of the same key gets back depends on where the first attempt got:
 
@@ -1072,13 +1098,17 @@ const endpoint = await client.createWebhookEndpoint({
 await saveSecret(endpoint.secret) // whsec_..., shown once
 ```
 
+The client sends `createWebhookEndpoint` once and never retries it, whatever `maxRetries` says.
+A retry of a create that did succeed would answer `secret: null`, and the secret would be lost.
+
 The answer carries the signing secret one time only. Store it at once. A repeat with the same
 idempotency key answers the same endpoint with `secret: null`, and no other route shows the
-secret. If you lose the secret, delete the endpoint and create a new one.
+secret. If you lose the secret, delete the endpoint and create it again with a new key.
 
-A create that got no answer can still have registered the endpoint. Repeat it with the same key.
-If the first create did not finish, the API replaces its endpoint and answers a new `id` and
-`secret`. If it did finish, you get the repeat answer with `secret: null`. When you use a key
+A create that got no answer (a timeout or a 5xx) can still have registered the endpoint. Repeat
+it with the same key. The answer can come back with `secret: null`: the first create did
+finish, and only its answer was lost. Then delete that endpoint and create it again with a new
+key. A same-key repeat does not always answer a new secret. When you use a key
 again more than a day later and its endpoint still exists, the call throws `ApiError` with
 `errorCode` `WEBHOOK_ALREADY_REGISTERED`. `error.result.error.params.webhookId` names that
 endpoint.
@@ -1153,16 +1183,21 @@ console.log(contract.version, contract.recurring.consentTextVersions)
 
 ## Errors
 
-Everything thrown by the SDK extends `DominaiteError`.
+Everything thrown by the SDK extends `DominaiteError`. Every result and every error carries
+`requestId`: the API's id for the call. Give it to support when you ask about a call. The SDK
+reads the `Dominaite-Request-Id` header, and `metadata.requestId` in the body when the header is
+absent. It is `null` when no answer arrived. On a result it is non-enumerable, so it stays out of
+`JSON.stringify` and object spreads; read it directly.
 
 | Error | When | What to do |
 |---|---|---|
 | `CheckoutRefusedError` | The API answered, `success: false`. `errorCode` carries the reason. | Branch on `errorCode`. Do not blind-retry. |
 | `StorefrontError` | 409 or 400 about the website the payment belongs to. `errorCode` is a storefront code, see below. Extends `ApiError`. | Fix the storefront setup. Retrying does not help. |
+| `ChargeError` | `chargePaymentMethod` answered with a charge code (`CHARGE_ERROR_CODES`), including 404 `PAYMENT_METHOD_NOT_FOUND` and `AGREEMENT_NOT_FOUND`. Extends `ApiError`; `charge` is the charge row when the API attached one. | Branch on `errorCode`. See [Stored payment methods](#stored-payment-methods-recurring). |
 | `RefundError` | A refund route refused with one of the refund codes. Extends `ApiError`; `retryable` says whether the same request can succeed later. | See [Refunds](#refunds). |
 | `AuthenticationError` | 401 with `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE` or `IP_NOT_ALLOWED`. 403 with `INSUFFICIENT_SCOPE` (the key does not hold the route's scope) or `VERIFY_ONLY_NOT_ENABLED`. `httpStatus` tells 401 from 403. | On 401, fix the key id, secret, server clock or allowlist. On `INSUFFICIENT_SCOPE`, use a key that holds the scope. On `VERIFY_ONLY_NOT_ENABLED`, ask us to switch verify-only on. Never retry-loop. |
 | `RateLimitError` | 429. `errorCode` says which limit: `RATE_LIMIT_EXCEEDED` (over 60 requests/min for the key or 120/min for the IP), `CHARGE_VELOCITY_EXCEEDED` or `CHARGE_DECLINE_RATE_EXCEEDED` (stored-card charges). `retryAfterSeconds` carries `Retry-After` when it was a whole number of seconds, else `null`. `result` is the whole answer. | Wait `retryAfterSeconds` (or your own backoff), then send it again with the **same** idempotency key. The SDK does not retry this for you. |
-| `TransportError` | Network failure, timeout, 5xx (`MERCHANT_API_UNAVAILABLE`), or a response body over 10MB. | Retry with the **same** idempotency key, and expect a replay refusal if the first attempt did land. |
+| `TransportError` | Network failure, timeout, 5xx, or a response body over 10MB. On a 5xx, `httpStatus` is the status and `errorCode` the API's code when it sent one (`INTERNAL_ERROR`, `MERCHANT_API_UNAVAILABLE`). The client already retried it `maxRetries` times, except for `createWebhookEndpoint`, a DELETE or PATCH call, and a body over 10MB, which it sends once. | Retry later with the **same** idempotency key, and expect a replay refusal if the first attempt did land. |
 | `ApiError` | Any other rejecting or unexpected response. `httpStatus` carries the HTTP status, `errorCode` the API's code when it sent one, and `result` the whole answer. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. |
 | `ApiError` with a 3xx `httpStatus` | The host you called answered with a redirect. | The Dominaite API never redirects, so the SDK refuses to follow one: your signed headers would be handed to whatever `Location` names, and its answer would look authentic. Check `baseUrl` and any proxy in front of it. |
 | `TypeError` | Bad arguments (float amount, missing field or idempotency key, malformed key id). | Fix the call; nothing was sent. |
@@ -1170,7 +1205,7 @@ Everything thrown by the SDK extends `DominaiteError`.
 Refusal codes on `CheckoutRefusedError.errorCode`:
 
 - `PAYMENT_PROCESSING_UNAVAILABLE` - card payments are off right now; retry later with the same
-  key. `createCheckoutSessionWithRetry` does this for you.
+  key. The client retries it for you, see [Retries and double-charges](#retries-and-double-charges).
 - `DUPLICATE_REQUEST` - the session for this key is still open but cannot be handed back right
   now (still being created, or expired and not settled yet); re-POST the same key shortly, never a
   fresh one.
@@ -1178,8 +1213,15 @@ Refusal codes on `CheckoutRefusedError.errorCode`:
 - `PRIOR_ATTEMPT_FAILED` - a prior attempt with this key failed terminally; use a fresh key.
 - `IDEMPOTENCY_KEY_REUSED` - same key sent with a different body; use a fresh key.
 
-Every code above has a named constant on `ErrorCodes`, so a typo fails to compile instead of
-silently never matching:
+A subscription session (`agreementId`) can also be refused with one of
+`SUBSCRIPTION_REFUSAL_ERROR_CODES`: the `AGREEMENT_*` codes, or `SUBSCRIPTIONS_NOT_ENABLED` when
+subscriptions are not on for your account. Nothing is created on any of them.
+
+Every code the API sends has a named constant on `ErrorCodes`, so a typo fails to compile instead
+of silently never matching. The lists per route are `CHARGE_ERROR_CODES`, `REVOKE_ERROR_CODES`,
+`REFUND_ERROR_CODES`, `RECURRING_ERROR_CODES` (plans and agreements), `WEBHOOK_ERROR_CODES`,
+`AUTH_ERROR_CODES` and `FIELD_ERROR_CODES` (the per-field codes in
+`result.error.validationErrors` of a 400):
 
 ```js
 import { CheckoutRefusedError, ErrorCodes } from '@dominaite/merchant-sdk'
@@ -1199,7 +1241,7 @@ the request before anything is created, and the SDK throws `StorefrontError`:
 |---|---|---|---|
 | `STOREFRONT_NOT_WHITELISTED` | 409 | The site's domain is not whitelisted at the payment provider yet. Usually a new website. | Ask Dominaite support to finish the whitelisting. |
 | `STOREFRONT_INACTIVE` | 409 | The storefront was deactivated or deleted. | Use the key for an active site, or ask Dominaite support to reactivate it. |
-| `STOREFRONT_MISMATCH` | 400 | The storefront in the request is not the one your API key is bound to. | Use the API key issued for that website. |
+| `STOREFRONT_MISMATCH` | 400, or 200 on a replay | The storefront in the request is not the one your API key is bound to. | Use the API key issued for that website. |
 
 ```js
 import { ErrorCodes, StorefrontError } from '@dominaite/merchant-sdk'
