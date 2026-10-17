@@ -47,8 +47,11 @@ function scriptedFetch(responses) {
   return { fetchImpl, calls }
 }
 
+/** Retries run at once in tests; the retry tests check the waits themselves. */
+const noWait = async () => {}
+
 function makeClient(fetchImpl, extra = {}) {
-  return new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl, ...extra })
+  return new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl, sleep: noWait, ...extra })
 }
 
 test('the same notice warns once per client, with the upgrade message', async () => {
@@ -198,15 +201,17 @@ test('onDebug gets one line per request with method, path, status, time, request
   assert.match(lines[2], new RegExp(`^dominaite-node: POST /merchant-api/checkout/sessions 400 \\d+ms idempotency_key=`))
 })
 
-test('a transport failure is logged with status error', async () => {
+test('a transport failure is logged with status error, one line per attempt', async () => {
   const lines = []
   const { fetchImpl } = scriptedFetch([{ throws: true }])
   const client = makeClient(fetchImpl, { onDebug: (line) => lines.push(line) })
 
   await assert.rejects(() => client.ping())
 
-  assert.equal(lines.length, 1)
+  assert.equal(lines.length, 3)
   assert.match(lines[0], /^dominaite-node: GET \/merchant-api\/ping error \d+ms$/)
+  assert.match(lines[1], /^dominaite-node: GET \/merchant-api\/ping error \d+ms retry=1$/)
+  assert.match(lines[2], /^dominaite-node: GET \/merchant-api\/ping error \d+ms retry=2$/)
 })
 
 test('the debug line leaves out the query string', async () => {

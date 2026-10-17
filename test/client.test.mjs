@@ -45,8 +45,11 @@ function jsonResponse(status, body) {
   })
 }
 
+/** Retries run at once in tests; the retry tests check the waits themselves. */
+const noWait = async () => {}
+
 function makeClient(fetchImpl) {
-  return new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl })
+  return new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl, sleep: noWait })
 }
 
 const CHECKOUT = {
@@ -556,8 +559,9 @@ test('an oversized response body is a TransportError, and the read stops at the 
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     )
 
+  const client = new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl, maxRetries: 0 })
   await assert.rejects(
-    () => makeClient(fetchImpl).createCheckoutSession(SESSION_PARAMS),
+    () => client.createCheckoutSession(SESSION_PARAMS),
     (error) => {
       assert.ok(error instanceof TransportError, 'an oversized body is the retryable class')
       assert.match(error.message, /exceeded/)

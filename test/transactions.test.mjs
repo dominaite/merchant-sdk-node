@@ -47,8 +47,11 @@ function page(items, nextCursor = null) {
   return { body: { success: true, data: { items, nextCursor } } }
 }
 
+/** Retries run at once in tests; the retry tests check the waits themselves. */
+const noWait = async () => {}
+
 function makeClient(fetchImpl) {
-  return new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl })
+  return new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl, sleep: noWait })
 }
 
 /** The signature computed from the documented scheme, independently of signRequest(). */

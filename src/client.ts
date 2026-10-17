@@ -103,6 +103,14 @@ const GENERIC_SERVER_ERROR_CODES: ReadonlySet<string> = new Set([
   'SERVICE_UNAVAILABLE',
   'MERCHANT_API_UNAVAILABLE',
 ])
+/** Retries after the first attempt, unless the client options say otherwise. */
+const DEFAULT_MAX_RETRIES = 2
+/** The first retry waits a random time up to this; each further retry doubles the ceiling. */
+const RETRY_BASE_DELAY_MS = 500
+/** No retry waits longer than this. */
+const RETRY_MAX_DELAY_MS = 8_000
+/** The code the API sends while card payments are briefly off: always worth a retry. */
+const PAYMENT_PROCESSING_UNAVAILABLE = 'PAYMENT_PROCESSING_UNAVAILABLE'
 /** Ping warns above this clock skew; the gateway rejects requests at 300 seconds. */
 const CLOCK_SKEW_WARNING_SECONDS = 60
 /** A Dominaite-Sdk-Notice value is cut to this length before it is read. */
@@ -164,6 +172,9 @@ export class DominaiteClient {
   readonly #userAgent: string
   readonly #onWarning: ((message: string) => void) | undefined
   readonly #onDebug: ((line: string) => void) | undefined
+  readonly #maxRetries: number
+  readonly #sleep: (ms: number) => Promise<void>
+  readonly #random: () => number
   /** The notice values this client has warned about, so each one warns once. */
   readonly #seenNotices = new Set<string>()
 
@@ -182,6 +193,12 @@ export class DominaiteClient {
     this.#userAgent = buildUserAgent(options.userAgent)
     this.#onWarning = optionalCallback(options.onWarning, 'onWarning')
     this.#onDebug = optionalCallback(options.onDebug, 'onDebug')
+    this.#maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES
+    if (!Number.isSafeInteger(this.#maxRetries) || this.#maxRetries < 0) {
+      throw new TypeError('maxRetries must be a whole number of 0 or more')
+    }
+    this.#sleep = optionalFunction(options.sleep, 'sleep') ?? delay
+    this.#random = optionalFunction(options.random, 'random') ?? Math.random
 
     const fetchImpl = options.fetch ?? globalThis.fetch
     if (typeof fetchImpl !== 'function') {
@@ -250,8 +267,12 @@ export class DominaiteClient {
    * WITH the same idempotencyKey).
    */
   async createCheckoutSession(params: CreateCheckoutSessionParams): Promise<CheckoutSession> {
+    return this.#createCheckoutSession(params, {})
+  }
+
+  async #createCheckoutSession(params: CreateCheckoutSessionParams, options: SendOptions): Promise<CheckoutSession> {
     const { idempotencyKey, body } = this.#prepareSessionRequest(params)
-    const reply = await this.#send('POST', SESSIONS_PATH, body, idempotencyKey)
+    const reply = await this.#send('POST', SESSIONS_PATH, body, idempotencyKey, options)
     if (reply.status >= 400) {
       throw rejection(reply)
     }
@@ -284,6 +305,10 @@ export class DominaiteClient {
   }
 
   /**
+   * @deprecated createCheckoutSession() retries by itself now, with the client's maxRetries.
+   * This stays as a thin wrapper: it runs createCheckoutSession() with `attempts` (total,
+   * default 3) and `baseDelayMs` (default 500) for this one call, and warns on each retry.
+   *
    * createCheckoutSession with retries on TransportError and on PAYMENT_PROCESSING_UNAVAILABLE,
    * sending your idempotency key unchanged on every attempt - which is what makes the retry
    * safe: the API never opens a second payment for a key it has already seen.
@@ -309,35 +334,20 @@ export class DominaiteClient {
     options: RetryOptions = {},
   ): Promise<CheckoutSession> {
     const attempts = options.attempts ?? 3
-    const baseDelayMs = options.baseDelayMs ?? 500
+    const baseDelayMs = options.baseDelayMs ?? RETRY_BASE_DELAY_MS
     if (!Number.isInteger(attempts) || attempts < 1) {
       throw new TypeError('attempts must be a positive integer')
     }
 
-    let lastError: TransportError | CheckoutRefusedError | undefined
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      try {
-        return await this.createCheckoutSession(params)
-      } catch (error) {
-        const retryable =
-          error instanceof TransportError ||
-          (error instanceof CheckoutRefusedError && error.errorCode === 'PAYMENT_PROCESSING_UNAVAILABLE')
-        if (!retryable) {
-          throw error
-        }
-        lastError = error
-        if (attempt < attempts - 1) {
-          const reason = error instanceof CheckoutRefusedError ? error.errorCode : error.name
-          this.#warn(
-            `dominaite-node: retrying createCheckoutSessionWithRetry after ${reason} (attempt ${attempt + 2} of ${attempts})`,
-            'DominaiteWarning',
-          )
-          await delay(baseDelayMs * 2 ** attempt)
-        }
-      }
-    }
-
-    throw lastError as TransportError | CheckoutRefusedError
+    return this.#createCheckoutSession(params, {
+      maxRetries: attempts - 1,
+      baseDelayMs,
+      onRetry: (reason, attempt) =>
+        this.#warn(
+          `dominaite-node: retrying createCheckoutSessionWithRetry after ${reason} (attempt ${attempt} of ${attempts})`,
+          'DominaiteWarning',
+        ),
+    })
   }
 
   /**
@@ -419,7 +429,11 @@ export class DominaiteClient {
   ): Promise<PaymentMethodCharge> {
     const id = normalizePaymentMethodId(paymentMethodId)
     const { idempotencyKey, body } = this.#prepareChargeRequest(params)
-    const reply = await this.#send('POST', `${PAYMENT_METHODS_PATH}/${id}/charges`, body, idempotencyKey)
+    // A charge code on a 5xx is the charge's own answer, not the API being down: only
+    // PAYMENT_PROCESSING_UNAVAILABLE among them is retried.
+    const reply = await this.#send('POST', `${PAYMENT_METHODS_PATH}/${id}/charges`, body, idempotencyKey, {
+      ownCodes: CHARGE_ERROR_CODES,
+    })
 
     const data = isPlainObject(reply.envelope['data']) ? reply.envelope['data'] : undefined
     const charge = data !== undefined && typeof data['chargeId'] === 'string' ? toCharge(data) : undefined
@@ -784,7 +798,7 @@ export class DominaiteClient {
   async listTransactions(params: ListTransactionsParams): Promise<TransactionPage> {
     const query = transactionQuery(params)
     // GET signs the path WITHOUT the query string, an EMPTY idempotency key and an EMPTY body.
-    const reply = await this.#send('GET', TRANSACTIONS_PATH, null, '', query)
+    const reply = await this.#send('GET', TRANSACTIONS_PATH, null, '', { query })
     const data = readObject(reply, 'transaction page')
     const items = data['items']
     return withMeta(
@@ -854,17 +868,54 @@ export class DominaiteClient {
   }
 
   /**
-   * Signs, sends and parses one request. Transport failures, redirects, non-JSON bodies,
-   * authentication failures (401, 403) and rate limiting (429) throw here because they
-   * mean the same thing on every route. Any other status comes back parsed, so a route
-   * can read the code and the data the gateway attached before deciding what it is.
+   * Sends one call, with the client's retry policy. A GET, and a POST that carries an
+   * idempotency key, are retried on a transport failure, a 5xx the route does not own, and
+   * PAYMENT_PROCESSING_UNAVAILABLE. Every attempt sends the same path, key and body bytes;
+   * only the timestamp, and so the signature, is fresh. A 429 is never retried. The last
+   * attempt's answer or error is what the caller gets.
    */
   async #send(
     method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
     path: string,
     body: string | null,
     idempotencyKey: string,
-    query = '',
+    options: SendOptions = {},
+  ): Promise<Reply> {
+    const safeToRepeat = method === 'GET' || (method === 'POST' && idempotencyKey !== '')
+    const maxRetries = safeToRepeat ? (options.maxRetries ?? this.#maxRetries) : 0
+    const baseDelayMs = options.baseDelayMs ?? RETRY_BASE_DELAY_MS
+    for (let attempt = 0; ; attempt++) {
+      let reason: string | null
+      try {
+        const reply = await this.#sendOnce(method, path, body, idempotencyKey, options.query ?? '', attempt)
+        reason = attempt < maxRetries ? retryReason(reply, options.ownCodes ?? []) : null
+        if (reason === null) {
+          return reply
+        }
+      } catch (error) {
+        if (attempt >= maxRetries || !(error instanceof TransportError)) {
+          throw error
+        }
+        reason = error.name
+      }
+      options.onRetry?.(reason, attempt + 2)
+      await this.#sleep(retryDelayMs(attempt, baseDelayMs, this.#random))
+    }
+  }
+
+  /**
+   * Signs, sends and parses one request. Transport failures, redirects, non-JSON bodies,
+   * authentication failures (401, 403) and rate limiting (429) throw here because they
+   * mean the same thing on every route. Any other status comes back parsed, so a route
+   * can read the code and the data the gateway attached before deciding what it is.
+   */
+  async #sendOnce(
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    path: string,
+    body: string | null,
+    idempotencyKey: string,
+    query: string,
+    attempt: number,
   ): Promise<Reply> {
     const started = performance.now()
     const outcome: Outcome = { status: 'error', requestId: null }
@@ -881,6 +932,9 @@ export class DominaiteClient {
         }
         if (idempotencyKey !== '') {
           line += ` idempotency_key=${idempotencyKey}`
+        }
+        if (attempt > 0) {
+          line += ` retry=${attempt}`
         }
         callSafely(this.#onDebug, line)
       }
@@ -973,10 +1027,10 @@ export class DominaiteClient {
     try {
       decoded = JSON.parse(raw)
     } catch {
-      throw new ApiError(response.status, 'The API returned a non-JSON response')
+      throw nonJson(response.status)
     }
     if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) {
-      throw new ApiError(response.status, 'The API returned a non-JSON response')
+      throw nonJson(response.status)
     }
 
     // The gateway wraps responses as { success, data, ... }; unwrap when present.
@@ -1047,6 +1101,53 @@ export class DominaiteClient {
   }
 }
 
+/** Per-call settings for #send. */
+interface SendOptions {
+  /** The query string, appended to the URL and never signed. */
+  query?: string
+  /** Codes this route answers on a 5xx as its own refusal: not retried, except PAYMENT_PROCESSING_UNAVAILABLE. */
+  ownCodes?: readonly string[]
+  /** Overrides the client's maxRetries for this call. */
+  maxRetries?: number
+  /** Overrides the base delay for this call. */
+  baseDelayMs?: number
+  /** Called before each retry with the reason and the number of the attempt about to run. */
+  onRetry?: (reason: string, attempt: number) => void
+}
+
+/**
+ * Why a parsed reply is worth another attempt, or null when it is not: a 5xx the route does
+ * not own, or PAYMENT_PROCESSING_UNAVAILABLE in either place the API puts it.
+ */
+function retryReason(reply: Reply, ownCodes: readonly string[]): string | null {
+  const refusalCode = stringOr(reply.payload['errorCode'], '')
+  const errorCode = stringOr(reply.error['code'], '')
+  if (refusalCode === PAYMENT_PROCESSING_UNAVAILABLE || errorCode === PAYMENT_PROCESSING_UNAVAILABLE) {
+    return PAYMENT_PROCESSING_UNAVAILABLE
+  }
+  if (reply.status >= 500 && !ownCodes.includes(errorCode)) {
+    return errorCode === '' ? `HTTP ${reply.status}` : errorCode
+  }
+  return null
+}
+
+/** Full jitter: a random wait between 0 and base * 2^attempt, capped at RETRY_MAX_DELAY_MS. */
+function retryDelayMs(attempt: number, baseDelayMs: number, random: () => number): number {
+  const ceiling = Math.min(RETRY_MAX_DELAY_MS, baseDelayMs * 2 ** attempt)
+  return Math.floor(random() * ceiling)
+}
+
+/** A body that is not a JSON object: a 5xx is a proxy or the API failing, anything else unexpected. */
+function nonJson(status: number): DominaiteError {
+  if (status >= 500) {
+    return new TransportError(
+      `The Dominaite API is unavailable (HTTP ${status}, not a JSON answer); retry with the same idempotency key.`,
+      { httpStatus: status },
+    )
+  }
+  return new ApiError(status, 'The API returned a non-JSON response')
+}
+
 /** What #send learns from the response, for the debug line. */
 interface Outcome {
   status: number | 'error'
@@ -1095,6 +1196,17 @@ function cleanHeader(value: string | null | undefined, max: number): string | nu
     return null
   }
   return value.slice(0, max).replace(/[\u0000-\u001f\u007f]/g, '').trim()
+}
+
+/** An injected function, or undefined when not set. */
+function optionalFunction<T extends (...args: never[]) => unknown>(value: T | undefined | null, name: string): T | undefined {
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  if (typeof value !== 'function') {
+    throw new TypeError(`${name} must be a function`)
+  }
+  return value
 }
 
 /** A caller's hook: a function, or undefined when not set. */

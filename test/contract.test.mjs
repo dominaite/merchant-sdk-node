@@ -739,8 +739,11 @@ function recordingFetch(body, status = 200) {
   return { fetchImpl, calls }
 }
 
+/** Retries run at once in tests; the retry tests check the waits themselves. */
+const noWait = async () => {}
+
 function makeClient(fetchImpl) {
-  return new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl })
+  return new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, fetch: fetchImpl, sleep: noWait })
 }
 
 async function rejects(run) {

@@ -919,9 +919,24 @@ export interface DominaiteClientOptions {
   onDebug?: (line: string) => void
   /** Injectable fetch, for tests or a proxy-aware implementation. Defaults to global fetch. */
   fetch?: typeof globalThis.fetch
+  /**
+   * How many times a failed call is sent again. Defaults to 2; 0 turns retries off. Only GET
+   * calls and POST calls that carry an idempotency key are retried, with the same key and
+   * the same body on every attempt. A retry follows a network failure, a timeout, a 5xx
+   * that is not the route's own answer, and PAYMENT_PROCESSING_UNAVAILABLE. A 429 is never
+   * retried. The wait before retry n is random between 0 and 500 ms * 2^(n-1), at most 8 s.
+   */
+  maxRetries?: number
+  /** Waits between retries. Defaults to a timer. For tests: inject one that resolves at once. */
+  sleep?: (ms: number) => Promise<void>
+  /** A number in [0, 1) that picks each retry wait. Defaults to Math.random. For tests. */
+  random?: () => number
 }
 
-/** Options for {@link DominaiteClient.createCheckoutSessionWithRetry}. */
+/**
+ * Options for {@link DominaiteClient.createCheckoutSessionWithRetry}.
+ * @deprecated Use the client's maxRetries option; createCheckoutSession() retries by itself.
+ */
 export interface RetryOptions {
   /** Total attempts including the first. Defaults to 3. */
   attempts?: number
