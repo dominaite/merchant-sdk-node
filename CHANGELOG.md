@@ -11,6 +11,21 @@
   (`https://api.dominaite.com/payments`), or your own value. `baseUrl` is no longer optional
   in `DominaiteClientOptions`.
 
+### Added
+
+- User-Agent: `dominaite-node/<version> (node <version>)`, with no leading `v` on the Node
+  version and no operating system. The new `userAgent` option appends your own identifier
+  after one space. A control character in it throws a `TypeError`.
+- Warning hook: `onWarning(message)`. Without it, warnings go to `process.emitWarning` with the
+  code `DOMINAITE_SDK`. You get a warning for a `Dominaite-Sdk-Notice` header (once per
+  distinct value per client, as a `DeprecationWarning`), for a retry in
+  `createCheckoutSessionWithRetry`, and for a ping clock skew above 60 seconds.
+- `Dominaite-Sdk-Notice`: the SDK reads it on every response, whatever the status. A missing
+  header does nothing.
+- Debug log: `onDebug(line)`, off by default. One line per request with the method, the
+  signed path, the status, the time in ms, the `Dominaite-Request-Id` and the idempotency
+  key. No line holds the secret, a signature, a `cashierToken`, a query string or a body.
+
 ## 0.5.2
 
 ### Added

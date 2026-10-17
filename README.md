@@ -234,6 +234,51 @@ const { DominaiteClient } = require('@dominaite/merchant-sdk')
 
 Same API. Node's `require()` of this package resolves to the CJS build.
 
+## Client options
+
+| Option | What |
+|---|---|
+| `keyId`, `secret` | Required. Your API key id (`dmk_...`) and secret (`dms_...`). |
+| `baseUrl` | Required. `SANDBOX_BASE_URL` or `PRODUCTION_BASE_URL`, or your own value. Must be `https://`; plain `http://` only for localhost, 127.0.0.1 and ::1. |
+| `timeoutMs` | Per-request timeout. Defaults to 45000 (serverless cold starts can take 10+ s). |
+| `fetch` | Your own fetch, for a proxy or a test double. Defaults to the global fetch. |
+| `userAgent` | Your own identifier, for example `shop/1.2`. The SDK sends `dominaite-node/<version> (node <version>) shop/1.2`, which helps when support reads the access logs. A control character throws a `TypeError`. |
+| `onWarning` | Receives the SDK's warnings. See [Logging and warnings](#logging-and-warnings). |
+| `onDebug` | Turns on the debug log. See [Logging and warnings](#logging-and-warnings). |
+
+## Logging and warnings
+
+The SDK writes nothing by itself except warnings. A warning goes to `onWarning(message)` when
+you pass it, and to `process.emitWarning` otherwise, with the code `DOMINAITE_SDK`. You get a
+warning when:
+
+- the API marks this SDK version as deprecated. It does that with a `Dominaite-Sdk-Notice`
+  header on any response. You get one `DeprecationWarning` per distinct notice per client,
+  for example `dominaite-node 0.6.0 is deprecated; upgrade to 0.7.0 (sunset 2027-01-31).`
+  followed by the link from the notice;
+- `createCheckoutSessionWithRetry` retries after a failure;
+- `ping()` sees a clock skew above 60 seconds. Requests fail at 300.
+
+The debug log is off by default. Pass `onDebug` to get one line per request:
+
+```js
+const client = new DominaiteClient({
+  keyId: process.env.DOMINAITE_KEY_ID,
+  secret: process.env.DOMINAITE_SECRET,
+  baseUrl: process.env.DOMINAITE_BASE_URL,
+  onWarning: (message) => logger.warn(message),
+  onDebug: (line) => logger.debug(line),
+})
+// dominaite-node: POST /merchant-api/checkout/sessions 201 182ms request_id=... idempotency_key=checkout-order-1042-2500-EUR
+```
+
+A line holds the method, the signed path, the status (`error` when the request did not reach
+the API), the time in milliseconds, the `Dominaite-Request-Id` of the response and the
+idempotency key you sent. Give support the request id when you ask about a call. No warning
+and no debug line ever holds your secret, a signature, a `cashierToken`, a query string or a
+request or response body. A hook that throws is ignored, so logging cannot fail a payment
+call.
+
 ## Amounts are minor units
 
 `amount` is always an integer in the currency's minor unit: `2500` is 25.00 EUR. The SDK rejects
