@@ -89,11 +89,15 @@ Set your credentials and the environment you are pointing at:
 ```bash
 export DOMINAITE_KEY_ID=dmk_...      # Website integration tab
 export DOMINAITE_SECRET=dms_...      # shown once when you generated the key
-# Production needs no DOMINAITE_BASE_URL - the SDK defaults to
-# https://api.dominaite.com/payments
-# For a test environment, set it to that environment's base URL:
-# export DOMINAITE_BASE_URL=https://...
+# Required. The SDK has no default base URL.
+export DOMINAITE_BASE_URL=https://api.staging.dominaite.com/payments   # sandbox
+# export DOMINAITE_BASE_URL=https://api.dominaite.com/payments         # production
 ```
+
+The base URL is required. When it is missing, empty or only whitespace, the constructor
+throws a `TypeError`, so an unset environment variable cannot send your requests to
+production by accident. You can also pass the exported constants `SANDBOX_BASE_URL` or
+`PRODUCTION_BASE_URL` instead of an environment variable.
 
 Ping before your first mint. It is one signed GET that creates nothing, so anything that
 fails here is your credentials, your signing or your clock:
@@ -104,7 +108,7 @@ import { DominaiteClient } from '@dominaite/merchant-sdk'
 const client = new DominaiteClient({
   keyId: process.env.DOMINAITE_KEY_ID,
   secret: process.env.DOMINAITE_SECRET,
-  baseUrl: process.env.DOMINAITE_BASE_URL, // omit in production
+  baseUrl: process.env.DOMINAITE_BASE_URL, // required
 })
 
 console.log(await client.ping())
@@ -131,7 +135,7 @@ import {
 const client = new DominaiteClient({
   keyId: process.env.DOMINAITE_KEY_ID,
   secret: process.env.DOMINAITE_SECRET,
-  baseUrl: process.env.DOMINAITE_BASE_URL, // omit in production
+  baseUrl: process.env.DOMINAITE_BASE_URL, // required
 })
 
 try {

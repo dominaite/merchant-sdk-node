@@ -411,8 +411,8 @@ test('amounts must be positive integers in minor units', async () => {
 })
 
 test('credentials are prefix-checked at construction', () => {
-  assert.throws(() => new DominaiteClient({ keyId: 'nope', secret: VECTOR.secret }), TypeError)
-  assert.throws(() => new DominaiteClient({ keyId: KEY_ID, secret: 'nope' }), TypeError)
+  assert.throws(() => new DominaiteClient({ keyId: 'nope', secret: VECTOR.secret, baseUrl: BASE_URL }), TypeError)
+  assert.throws(() => new DominaiteClient({ keyId: KEY_ID, secret: 'nope', baseUrl: BASE_URL }), TypeError)
 })
 
 test('a redirect is never followed, whatever the 3xx status', async () => {
@@ -744,7 +744,7 @@ test('https and loopback http are accepted', () => {
   }
 })
 
-test('the default baseUrl is https and trailing slashes are still stripped', async () => {
+test('trailing slashes on baseUrl are stripped', async () => {
   const { fetchImpl, calls } = recordingFetch({ body: { success: true, checkout: CHECKOUT } })
   const client = new DominaiteClient({
     keyId: KEY_ID,

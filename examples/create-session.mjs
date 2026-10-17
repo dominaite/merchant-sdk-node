@@ -2,7 +2,7 @@
 //
 //   export DOMINAITE_KEY_ID=dmk_...
 //   export DOMINAITE_SECRET=dms_...
-//   export DOMINAITE_BASE_URL=https://<dev-payments-host>/api   # omit for production
+//   export DOMINAITE_BASE_URL=https://api.staging.dominaite.com/payments   # required
 //   node examples/create-session.mjs
 //
 // Run `npm run build` first - this imports the built output.
@@ -10,16 +10,17 @@ import { CheckoutRefusedError, DominaiteClient, orderIdempotencyKey, TransportEr
 
 const keyId = process.env.DOMINAITE_KEY_ID
 const secret = process.env.DOMINAITE_SECRET
+const baseUrl = process.env.DOMINAITE_BASE_URL
 
-if (!keyId || !secret) {
-  console.error('Set DOMINAITE_KEY_ID and DOMINAITE_SECRET first.')
+if (!keyId || !secret || !baseUrl) {
+  console.error('Set DOMINAITE_KEY_ID, DOMINAITE_SECRET and DOMINAITE_BASE_URL first.')
   process.exit(1)
 }
 
 const client = new DominaiteClient({
   keyId,
   secret,
-  ...(process.env.DOMINAITE_BASE_URL ? { baseUrl: process.env.DOMINAITE_BASE_URL } : {}),
+  baseUrl,
 })
 
 const orderReference = `smoke-${Date.now()}`

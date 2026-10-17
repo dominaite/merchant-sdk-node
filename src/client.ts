@@ -43,7 +43,12 @@ import type {
   WebhookEndpoint,
 } from './types.js'
 
-const DEFAULT_BASE_URL = 'https://api.dominaite.com/payments'
+/** The sandbox merchant API. Pass it as `baseUrl` while you integrate. */
+export const SANDBOX_BASE_URL = 'https://api.staging.dominaite.com/payments'
+/** The production merchant API. Pass it as `baseUrl` to take live payments. */
+export const PRODUCTION_BASE_URL = 'https://api.dominaite.com/payments'
+const BASE_URL_REQUIRED =
+  `baseUrl is required. Use ${SANDBOX_BASE_URL} for the sandbox or ${PRODUCTION_BASE_URL} for production.`
 const SESSIONS_PATH = '/merchant-api/checkout/sessions'
 const PAYMENT_METHODS_PATH = '/merchant-api/payment-methods'
 const PAYMENTS_PATH = '/merchant-api/payments'
@@ -103,6 +108,7 @@ interface Reply {
  *   const client = new DominaiteClient({
  *     keyId: process.env.DOMINAITE_KEY_ID,
  *     secret: process.env.DOMINAITE_SECRET,
+ *     baseUrl: process.env.DOMINAITE_BASE_URL, // required: SANDBOX_BASE_URL or PRODUCTION_BASE_URL
  *   })
  *   const session = await client.createCheckoutSession({
  *     amount: 2500,                  // minor units: 25.00 EUR
@@ -137,7 +143,7 @@ export class DominaiteClient {
 
     this.#keyId = options.keyId
     this.#secret = options.secret
-    this.#baseUrl = normalizeBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL)
+    this.#baseUrl = normalizeBaseUrl(options.baseUrl)
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
     const fetchImpl = options.fetch ?? globalThis.fetch
@@ -1275,17 +1281,25 @@ function encodeBody(bodyParams: Record<string, unknown>): string {
 }
 
 /**
- * Strips trailing slashes and refuses anything that would put a signed request on the
- * wire in the clear. http:// is allowed only for the loopback names a developer runs a
- * local gateway on; everywhere else the API key id, timestamp and signature would be
- * readable by anything on the path, and the reply would be forgeable.
+ * Requires a base URL, strips whitespace and trailing slashes, and refuses anything that
+ * would put a signed request on the wire in the clear. There is no default: a missing
+ * value (an unset environment variable, say) must not quietly send sandbox credentials to
+ * production. http:// is allowed only for the loopback names a developer runs a local
+ * gateway on; everywhere else the API key id, timestamp and signature would be readable
+ * by anything on the path, and the reply would be forgeable.
  */
-function normalizeBaseUrl(baseUrl: string): string {
-  if (typeof baseUrl !== 'string' || baseUrl === '') {
+function normalizeBaseUrl(baseUrl: string | undefined | null): string {
+  if (baseUrl === undefined || baseUrl === null) {
+    throw new TypeError(BASE_URL_REQUIRED)
+  }
+  if (typeof baseUrl !== 'string') {
     throw new TypeError('baseUrl must be a URL string')
   }
 
-  const trimmed = baseUrl.replace(/\/+$/, '')
+  const trimmed = baseUrl.trim().replace(/\/+$/, '')
+  if (trimmed === '') {
+    throw new TypeError(BASE_URL_REQUIRED)
+  }
 
   let parsed: URL
   try {

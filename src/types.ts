@@ -858,13 +858,16 @@ export interface DominaiteClientOptions {
   /** Your API secret (dms_...). Server-side only. */
   secret: string
   /**
-   * Override for non-production environments. Defaults to the production API.
+   * The API to call. Required: there is no default. Use SANDBOX_BASE_URL
+   * (https://api.staging.dominaite.com/payments) or PRODUCTION_BASE_URL
+   * (https://api.dominaite.com/payments). A missing, empty or whitespace-only value
+   * throws a TypeError at construction.
    *
    * Must be https://. Plain http is accepted only for localhost, 127.0.0.1 and ::1,
    * so a local gateway still works while a staging host cannot end up sending your
    * signed headers in the clear.
    */
-  baseUrl?: string
+  baseUrl: string
   /** Per-request timeout in milliseconds. Defaults to 45000. */
   timeoutMs?: number
   /** Injectable fetch, for tests or a proxy-aware implementation. Defaults to global fetch. */

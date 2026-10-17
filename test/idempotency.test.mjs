@@ -57,7 +57,7 @@ test('the derived key is what goes on the wire as Idempotency-Key', async () => 
     calls.push(init)
     return new Response(JSON.stringify({ success: true, checkout: {} }), { status: 200 })
   }
-  const client = new DominaiteClient({ keyId: 'dmk_test', secret: VECTOR.secret, fetch: fetchImpl })
+  const client = new DominaiteClient({ keyId: 'dmk_test', secret: VECTOR.secret, baseUrl: 'https://dev.example.test/payments', fetch: fetchImpl })
 
   await client.createCheckoutSession({
     amount: 2500,
