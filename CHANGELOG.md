@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.7.0 (unreleased)
+
+### Breaking
+
+- The client retries failed calls by default. Every GET call, and every POST call with an
+  idempotency key, is sent again after a network failure, a 5xx or
+  `PAYMENT_PROCESSING_UNAVAILABLE`, up to `maxRetries` times (default 2). Each attempt sends the
+  same idempotency key and body. The wait is random between 0 and 500 ms times 2 per attempt,
+  at most 8 seconds. A 429 is never retried. Pass `maxRetries: 0` to keep the old behaviour.
+- A coded 404 from `chargePaymentMethod` (`PAYMENT_METHOD_NOT_FOUND`, `AGREEMENT_NOT_FOUND`) is
+  a `ChargeError`, not an `ApiError`. `ChargeError` now extends `ApiError`, so
+  `instanceof ApiError` still matches.
+- A 5xx with a generic code (`INTERNAL_ERROR`, `SERVICE_UNAVAILABLE`) on a charge or a revoke is
+  a `TransportError`, not a `ChargeError` or `RevokeError`. `MERCHANT_API_UNAVAILABLE` on a
+  revoke stays a `RevokeError`.
+- A 5xx with a body that is not JSON is a `TransportError`, not an `ApiError`.
+- A checkout replay refused with `STOREFRONT_MISMATCH` at HTTP 200 throws `StorefrontError`, not
+  `CheckoutRefusedError`.
+- `currency` must be three uppercase letters. The client throws `TypeError` before it sends.
+- Webhook types declare `kind`, `grossAmount` and `surchargeAmount` on payment events as
+  nullable, because the API sends explicit nulls.
+
+### Added
+
+- `requestId` on every result and every error. The client reads the `Dominaite-Request-Id`
+  header and falls back to `metadata.requestId` in the body. On results it is non-enumerable.
+- Client options `maxRetries`, `sleep` and `random`.
+- `TransportError` carries `httpStatus`, `errorCode` and `result` when a 5xx caused it.
+- `ErrorCodes` lists every code the API sends. New lists: `AUTH_ERROR_CODES`,
+  `FIELD_ERROR_CODES`, `SUBSCRIPTION_REFUSAL_ERROR_CODES`, `RECURRING_ERROR_CODES` and
+  `WEBHOOK_ERROR_CODES`. `CHARGE_ERROR_CODES` gained the plan, agreement and cap codes.
+- The debug line of a retried attempt ends in `retry=<n>`.
+
+### Fixed
+
+- A stored payment method id with uppercase hex (`pm_` plus 32 characters) is sent and signed
+  in lowercase, as the API expects.
+- The `theme` type accepts any string, not only `light`, `dark` and `bright`.
+
+### Deprecated
+
+- `createCheckoutSessionWithRetry` and `RetryOptions`. The client retries on its own now. The
+  method still works and warns on each retry.
+
 ## 0.6.0
 
 ### Breaking
