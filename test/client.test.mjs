@@ -563,7 +563,7 @@ test('an oversized response body is a TransportError, and the read stops at the 
   await assert.rejects(
     () => client.createCheckoutSession(SESSION_PARAMS),
     (error) => {
-      assert.ok(error instanceof TransportError, 'an oversized body is the retryable class')
+      assert.ok(error instanceof TransportError, 'an oversized body is a TransportError')
       assert.match(error.message, /exceeded/)
       return true
     },

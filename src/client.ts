@@ -896,7 +896,7 @@ export class DominaiteClient {
           return reply
         }
       } catch (error) {
-        if (attempt >= maxRetries || !(error instanceof TransportError)) {
+        if (attempt >= maxRetries || !(error instanceof TransportError) || error instanceof OversizedBodyError) {
           throw error
         }
         reason = error.name
@@ -1732,8 +1732,19 @@ async function readBoundedText(response: Response): Promise<string> {
   return text + decoder.decode()
 }
 
+/**
+ * An answer that did arrive but was too large to read. Not retried: the API acted on the
+ * call, so a retry would only replay it. Callers see a plain TransportError.
+ */
+class OversizedBodyError extends TransportError {
+  constructor(message: string) {
+    super(message)
+    this.name = 'TransportError'
+  }
+}
+
 function oversizedBody(): TransportError {
-  return new TransportError(
+  return new OversizedBodyError(
     `The Dominaite API response exceeded the ${MAX_RESPONSE_BYTES} byte limit and was not read. ` +
       'Check your baseUrl and any proxy in front of it, then retry with the same idempotency key.',
   )

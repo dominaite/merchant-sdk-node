@@ -269,3 +269,29 @@ test('createWebhookEndpoint is sent once: a retry after a lost answer would come
     assert.equal(sleeps.length, 0)
   }
 })
+
+test('an oversized response body is not retried: the API did answer, a retry would only replay it', async () => {
+  const chunk = new Uint8Array(1024 * 1024).fill(0x20)
+  const calls = []
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init })
+    return new Response(
+      new ReadableStream({
+        pull(controller) {
+          controller.enqueue(chunk.slice())
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+  const { client, sleeps } = makeClient(fetchImpl)
+
+  await assert.rejects(client.chargePaymentMethod(PAYMENT_METHOD_ID, CHARGE_PARAMS), (error) => {
+    assert.ok(error instanceof TransportError)
+    assert.equal(error.name, 'TransportError')
+    assert.match(error.message, /exceeded/)
+    return true
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(sleeps.length, 0)
+})
