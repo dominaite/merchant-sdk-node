@@ -1290,7 +1290,8 @@ test('ErrorCodes names each code as itself and cannot be changed at runtime', ()
   for (const [name, value] of Object.entries(ErrorCodes)) {
     assert.equal(value, name)
   }
-  assert.deepEqual(Object.keys(ErrorCodes).sort(), [
+  // These names shipped first and stay; error-codes.test.mjs pins the rest to the contract.
+  const shipped = [
     'ALREADY_PROCESSED',
     'CHARGE_DECLINE_RATE_EXCEEDED',
     'CHARGE_VELOCITY_EXCEEDED',
@@ -1309,7 +1310,10 @@ test('ErrorCodes names each code as itself and cannot be changed at runtime', ()
     'STOREFRONT_MISMATCH',
     'STOREFRONT_NOT_WHITELISTED',
     'VERIFY_ONLY_NOT_ENABLED',
-  ])
+  ]
+  for (const name of shipped) {
+    assert.equal(ErrorCodes[name], name)
+  }
   assert.ok(Object.isFrozen(ErrorCodes))
   // The replay and availability constants are the refusal codes a session actually raises.
   for (const code of ['ALREADY_PROCESSED', 'PRIOR_ATTEMPT_FAILED', 'DUPLICATE_REQUEST', 'PAYMENT_PROCESSING_UNAVAILABLE', 'IDEMPOTENCY_KEY_REUSED']) {

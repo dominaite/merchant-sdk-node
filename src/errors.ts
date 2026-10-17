@@ -75,7 +75,141 @@ export const ErrorCodes = Object.freeze({
   CHARGE_VELOCITY_EXCEEDED: 'CHARGE_VELOCITY_EXCEEDED',
   /** 429 on chargePaymentMethod: too many declines, so the key's charge route is locked. A RateLimitError. */
   CHARGE_DECLINE_RATE_EXCEEDED: 'CHARGE_DECLINE_RATE_EXCEEDED',
+
+  // 401: the request did not authenticate. An AuthenticationError. See AUTH_ERROR_CODES.
+  INVALID_API_KEY: 'INVALID_API_KEY',
+  INVALID_SIGNATURE: 'INVALID_SIGNATURE',
+  TIMESTAMP_OUT_OF_RANGE: 'TIMESTAMP_OUT_OF_RANGE',
+  IP_NOT_ALLOWED: 'IP_NOT_ALLOWED',
+
+  /** 400: the idempotency key was missing or too long. */
+  IDEMPOTENCY_KEY_REQUIRED: 'IDEMPOTENCY_KEY_REQUIRED',
+  /** 503: the API is briefly unavailable. A TransportError, or a RevokeError on revoke. */
+  MERCHANT_API_UNAVAILABLE: 'MERCHANT_API_UNAVAILABLE',
+
+  // Field codes, on error.validationErrors[].code of a 400. See FIELD_ERROR_CODES.
+  REQUIRED: 'REQUIRED',
+  MIN_VALUE: 'MIN_VALUE',
+  MAX_LENGTH: 'MAX_LENGTH',
+  INVALID_FORMAT: 'INVALID_FORMAT',
+  INVALID_SELECTION: 'INVALID_SELECTION',
+  DATE_IN_FUTURE: 'DATE_IN_FUTURE',
+  INVALID_EMAIL: 'INVALID_EMAIL',
+  INVALID_CURRENCY: 'INVALID_CURRENCY',
+
+  // Checkout session refusals for a subscription session. See SUBSCRIPTION_REFUSAL_ERROR_CODES.
+  AGREEMENT_NOT_PENDING: 'AGREEMENT_NOT_PENDING',
+  AGREEMENT_SESSION_OPEN: 'AGREEMENT_SESSION_OPEN',
+  AGREEMENT_ALREADY_PAID: 'AGREEMENT_ALREADY_PAID',
+  AGREEMENT_VARIABLE_AMOUNT_UNSUPPORTED: 'AGREEMENT_VARIABLE_AMOUNT_UNSUPPORTED',
+  SUBSCRIPTIONS_NOT_ENABLED: 'SUBSCRIPTIONS_NOT_ENABLED',
+
+  // chargePaymentMethod. See CHARGE_ERROR_CODES.
+  PAYMENT_METHOD_NOT_FOUND: 'PAYMENT_METHOD_NOT_FOUND',
+  PAYMENT_METHOD_NOT_ACTIVE: 'PAYMENT_METHOD_NOT_ACTIVE',
+  CHARGE_IN_PROGRESS: 'CHARGE_IN_PROGRESS',
+  CHARGE_CURRENCY_MISMATCH: 'CHARGE_CURRENCY_MISMATCH',
+  CHARGE_OUTCOME_UNKNOWN: 'CHARGE_OUTCOME_UNKNOWN',
+  CHARGE_FAILED: 'CHARGE_FAILED',
+  PAYMENT_METHOD_CHARGES_DISABLED: 'PAYMENT_METHOD_CHARGES_DISABLED',
+  AGREEMENT_METHOD_MISMATCH: 'AGREEMENT_METHOD_MISMATCH',
+  AGREEMENT_CONSENT_MISSING: 'AGREEMENT_CONSENT_MISSING',
+  AGREEMENT_CURRENCY_MISMATCH: 'AGREEMENT_CURRENCY_MISMATCH',
+  AGREEMENT_AMOUNT_MISMATCH: 'AGREEMENT_AMOUNT_MISMATCH',
+  CHARGE_AMOUNT_ABOVE_AGREEMENT: 'CHARGE_AMOUNT_ABOVE_AGREEMENT',
+  AGREEMENT_PERIOD_ALREADY_CHARGED: 'AGREEMENT_PERIOD_ALREADY_CHARGED',
+  AGREEMENT_NOT_STARTED: 'AGREEMENT_NOT_STARTED',
+  CHARGE_AMOUNT_ABOVE_CAP: 'CHARGE_AMOUNT_ABOVE_CAP',
+  /** HTTP 402 on chargePaymentMethod. Never an exception: the charge resolves with status 'failed'. */
+  CHARGE_DECLINED: 'CHARGE_DECLINED',
+
+  // revokePaymentMethod. See REVOKE_ERROR_CODES.
+  UPSTREAM_CONTRACT_ERROR: 'UPSTREAM_CONTRACT_ERROR',
+
+  // Plans and agreements. See RECURRING_ERROR_CODES.
+  PLAN_NOT_FOUND: 'PLAN_NOT_FOUND',
+  PLAN_NOT_ACTIVE: 'PLAN_NOT_ACTIVE',
+  AGREEMENT_NOT_FOUND: 'AGREEMENT_NOT_FOUND',
+  AGREEMENT_ENDED: 'AGREEMENT_ENDED',
+  PAYMENT_METHOD_CURRENCY_MISMATCH: 'PAYMENT_METHOD_CURRENCY_MISMATCH',
+  PAYMENT_METHOD_CURRENCY_UNKNOWN: 'PAYMENT_METHOD_CURRENCY_UNKNOWN',
+  MAX_AMOUNT_BELOW_PLAN_AMOUNT: 'MAX_AMOUNT_BELOW_PLAN_AMOUNT',
+  AGREEMENT_CONSENT_REQUIRED: 'AGREEMENT_CONSENT_REQUIRED',
+
+  // Webhook endpoints. See WEBHOOK_ERROR_CODES.
+  WEBHOOK_NOT_FOUND: 'WEBHOOK_NOT_FOUND',
+  WEBHOOK_LIMIT_REACHED: 'WEBHOOK_LIMIT_REACHED',
+  WEBHOOK_ALREADY_REGISTERED: 'WEBHOOK_ALREADY_REGISTERED',
+  WEBHOOK_URL_REJECTED: 'WEBHOOK_URL_REJECTED',
 } as const)
+
+/**
+ * The codes of the contract's auth group, in the contract's order. Each arrives as an
+ * {@link AuthenticationError} with httpStatus 401. Fix the key id, the secret, the server
+ * clock or the IP allowlist; do not retry the same request.
+ */
+export const AUTH_ERROR_CODES = ['INVALID_API_KEY', 'INVALID_SIGNATURE', 'TIMESTAMP_OUT_OF_RANGE', 'IP_NOT_ALLOWED'] as const
+
+/** One of the auth codes this SDK knows about. */
+export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[number]
+
+/**
+ * The field codes of the contract's validation group, in the contract's order. They sit on
+ * `result.error.validationErrors[].code` of a 400 ApiError, one per field; `errorCode` itself
+ * is VALIDATION_ERROR.
+ */
+export const FIELD_ERROR_CODES = [
+  'REQUIRED',
+  'MIN_VALUE',
+  'MAX_LENGTH',
+  'INVALID_FORMAT',
+  'INVALID_SELECTION',
+  'DATE_IN_FUTURE',
+  'INVALID_EMAIL',
+  'INVALID_CURRENCY',
+] as const
+
+/** One of the field codes this SDK knows about. Unknown codes arrive as plain strings. */
+export type FieldErrorCode = (typeof FIELD_ERROR_CODES)[number]
+
+/**
+ * The codes the plan and agreement routes answer with, as an {@link ApiError}: 404
+ * PLAN_NOT_FOUND, AGREEMENT_NOT_FOUND, PAYMENT_METHOD_NOT_FOUND; 409 PLAN_NOT_ACTIVE,
+ * AGREEMENT_ENDED, PAYMENT_METHOD_NOT_ACTIVE; 422 the rest. Nothing is created on any of them.
+ */
+export const RECURRING_ERROR_CODES = [
+  'PLAN_NOT_FOUND',
+  'PLAN_NOT_ACTIVE',
+  'AGREEMENT_NOT_FOUND',
+  'AGREEMENT_ENDED',
+  'PAYMENT_METHOD_NOT_FOUND',
+  'PAYMENT_METHOD_NOT_ACTIVE',
+  'PAYMENT_METHOD_CURRENCY_MISMATCH',
+  'PAYMENT_METHOD_CURRENCY_UNKNOWN',
+  'MAX_AMOUNT_BELOW_PLAN_AMOUNT',
+  'AGREEMENT_CONSENT_REQUIRED',
+  'IDEMPOTENCY_KEY_REUSED',
+] as const
+
+/** One of the plan and agreement codes this SDK knows about. Unknown codes arrive as plain strings. */
+export type RecurringErrorCode = (typeof RECURRING_ERROR_CODES)[number]
+
+/**
+ * The codes the webhook endpoint routes answer with, as an {@link ApiError}: 404
+ * WEBHOOK_NOT_FOUND; 409 WEBHOOK_LIMIT_REACHED, WEBHOOK_ALREADY_REGISTERED, DUPLICATE_REQUEST;
+ * 400 WEBHOOK_URL_REJECTED; 422 IDEMPOTENCY_KEY_REUSED.
+ */
+export const WEBHOOK_ERROR_CODES = [
+  'WEBHOOK_NOT_FOUND',
+  'WEBHOOK_LIMIT_REACHED',
+  'WEBHOOK_ALREADY_REGISTERED',
+  'WEBHOOK_URL_REJECTED',
+  'IDEMPOTENCY_KEY_REUSED',
+  'DUPLICATE_REQUEST',
+] as const
+
+/** One of the webhook endpoint codes this SDK knows about. Unknown codes arrive as plain strings. */
+export type WebhookErrorCode = (typeof WEBHOOK_ERROR_CODES)[number]
 
 /**
  * The codes the SDK raises as a {@link StorefrontError}, on sessions and charges alike, in
@@ -138,8 +272,26 @@ export const SESSION_REFUSAL_ERROR_CODES = [
   'PRIOR_ATTEMPT_FAILED',
 ] as const
 
+/**
+ * The refusals of a subscription session (createCheckoutSession with agreementId), also HTTP
+ * 200 with success=false and also a {@link CheckoutRefusedError}. Nothing is created on any
+ * of them. SUBSCRIPTIONS_NOT_ENABLED: subscriptions are not on for your account.
+ */
+export const SUBSCRIPTION_REFUSAL_ERROR_CODES = [
+  'AGREEMENT_NOT_FOUND',
+  'AGREEMENT_NOT_PENDING',
+  'AGREEMENT_AMOUNT_MISMATCH',
+  'AGREEMENT_CONSENT_REQUIRED',
+  'AGREEMENT_SESSION_OPEN',
+  'AGREEMENT_ALREADY_PAID',
+  'AGREEMENT_VARIABLE_AMOUNT_UNSUPPORTED',
+  'SUBSCRIPTIONS_NOT_ENABLED',
+] as const
+
 /** One of the refusal codes this SDK knows about. Unknown codes arrive as plain strings. */
-export type SessionRefusalErrorCode = (typeof SESSION_REFUSAL_ERROR_CODES)[number]
+export type SessionRefusalErrorCode =
+  | (typeof SESSION_REFUSAL_ERROR_CODES)[number]
+  | (typeof SUBSCRIPTION_REFUSAL_ERROR_CODES)[number]
 
 /**
  * Input validation on the create endpoint. A different shape from the refusals above:
@@ -221,9 +373,10 @@ export class StorefrontError extends ApiError {
 }
 
 /**
- * The codes {@link DominaiteClient.chargePaymentMethod} raises as a {@link ChargeError},
- * in the gateway's own order. CHARGE_DECLINED (HTTP 402) is deliberately not one of them:
- * a decline is a charge result with status 'failed', not an exception.
+ * The codes {@link DominaiteClient.chargePaymentMethod} raises as a {@link ChargeError}.
+ * CHARGE_DECLINED (HTTP 402) is deliberately not one of them: a decline is a charge result
+ * with status 'failed', not an exception. Neither are the 429 limits: they arrive as a
+ * {@link RateLimitError}.
  */
 export const CHARGE_ERROR_CODES = [
   'PAYMENT_METHOD_NOT_ACTIVE',
@@ -233,6 +386,19 @@ export const CHARGE_ERROR_CODES = [
   'CHARGE_FAILED',
   'PAYMENT_METHOD_CHARGES_DISABLED',
   'PAYMENT_PROCESSING_UNAVAILABLE',
+  'PAYMENT_METHOD_NOT_FOUND',
+  'CHARGE_IN_PROGRESS',
+  'CHARGE_CURRENCY_MISMATCH',
+  'AGREEMENT_NOT_FOUND',
+  'AGREEMENT_METHOD_MISMATCH',
+  'AGREEMENT_CONSENT_MISSING',
+  'AGREEMENT_CURRENCY_MISMATCH',
+  'AGREEMENT_AMOUNT_MISMATCH',
+  'CHARGE_AMOUNT_ABOVE_AGREEMENT',
+  'AGREEMENT_PERIOD_ALREADY_CHARGED',
+  'AGREEMENT_ENDED',
+  'AGREEMENT_NOT_STARTED',
+  'CHARGE_AMOUNT_ABOVE_CAP',
 ] as const
 
 /** One of the charge error codes this SDK knows about. Unknown codes arrive as plain strings. */
