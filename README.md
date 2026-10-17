@@ -1304,3 +1304,17 @@ The signed payload is five lines:
 `"{timestamp}\n{METHOD}\n{path}\n{idempotencyKey}\n{sha256hex(body)}"`, signed as lowercase hex
 HMAC-SHA256 with your secret, UTF-8 throughout. GET signs an empty idempotency key and an empty
 body, and sends no `Idempotency-Key` header.
+
+## Versioning and support
+
+The SDK is 0.x on purpose. A minor release (for example 0.6 to 0.7) can contain a breaking
+change. A patch release (0.6.0 to 0.6.1) does not. `CHANGELOG.md` lists every breaking change
+and what to do about it. Pin the minor version you tested with, for example `~0.6.0`.
+
+The SDK needs Node.js 20 or later. CI tests it on Node 20 and Node 24.
+
+When the API marks your SDK version as deprecated, it sends a `Dominaite-Sdk-Notice` header.
+The client turns it into one `DeprecationWarning` per distinct notice (see
+[Logging and warnings](#logging-and-warnings)). The warning names the version to upgrade to and
+the sunset date when the notice carries them. Route `onWarning` to a log you read, so you see
+the notice before the sunset date. A response without the header changes nothing.
