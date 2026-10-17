@@ -858,15 +858,39 @@ export interface DominaiteClientOptions {
   /** Your API secret (dms_...). Server-side only. */
   secret: string
   /**
-   * Override for non-production environments. Defaults to the production API.
+   * The API to call. Required: there is no default. Use SANDBOX_BASE_URL
+   * (https://api.staging.dominaite.com/payments) or PRODUCTION_BASE_URL
+   * (https://api.dominaite.com/payments). A missing, empty or whitespace-only value
+   * throws a TypeError at construction.
    *
    * Must be https://. Plain http is accepted only for localhost, 127.0.0.1 and ::1,
    * so a local gateway still works while a staging host cannot end up sending your
    * signed headers in the clear.
    */
-  baseUrl?: string
+  baseUrl: string
   /** Per-request timeout in milliseconds. Defaults to 45000. */
   timeoutMs?: number
+  /**
+   * Your own identifier, appended to the SDK's User-Agent after one space, for example
+   * 'shop/1.2'. It helps when Dominaite support reads the access logs for your integration.
+   * Trimmed; blank means none. A control character throws a TypeError at construction.
+   */
+  userAgent?: string
+  /**
+   * Receives the SDK's warnings: a Dominaite-Sdk-Notice from the API (once per distinct
+   * value), a retry in createCheckoutSessionWithRetry, and a ping clock skew above 60 s.
+   * Defaults to process.emitWarning (type DeprecationWarning for the notice, DominaiteWarning
+   * otherwise, code DOMINAITE_SDK). A hook that throws is ignored. A warning never carries
+   * the secret, a signature, a cashierToken or a body.
+   */
+  onWarning?: (message: string) => void
+  /**
+   * Turns on the debug log: one line per request with the method, the signed path, the
+   * status, the time in ms, the Dominaite-Request-Id and the idempotency key. Off when
+   * unset. A line never carries the secret, a signature, a cashierToken, a query string or
+   * a body.
+   */
+  onDebug?: (line: string) => void
   /** Injectable fetch, for tests or a proxy-aware implementation. Defaults to global fetch. */
   fetch?: typeof globalThis.fetch
 }

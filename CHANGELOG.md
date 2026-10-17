@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.6.0
+
+### Breaking
+
+- The base URL is required. The client no longer falls back to production when you leave it
+  out, so an unset environment variable cannot send sandbox credentials to production.
+  Construction fails with `TypeError` when the base URL is missing, empty or whitespace. Pass
+  `SANDBOX_BASE_URL` (`https://api.staging.dominaite.com/payments`) or `PRODUCTION_BASE_URL`
+  (`https://api.dominaite.com/payments`), or your own value. `baseUrl` is no longer optional
+  in `DominaiteClientOptions`.
+
+### Added
+
+- User-Agent: `dominaite-node/<version> (node <version>)`, with no leading `v` on the Node
+  version and no operating system. The new `userAgent` option appends your own identifier
+  after one space. A control character in it throws a `TypeError`.
+- Warning hook: `onWarning(message)`. Without it, warnings go to `process.emitWarning` with the
+  code `DOMINAITE_SDK`. You get a warning for a `Dominaite-Sdk-Notice` header (once per
+  distinct value per client, as a `DeprecationWarning`), for a retry in
+  `createCheckoutSessionWithRetry`, and for a ping clock skew above 60 seconds.
+- `Dominaite-Sdk-Notice`: the SDK reads it on every response, whatever the status. A missing
+  header does nothing.
+- Debug log: `onDebug(line)`, off by default. One line per request with the method, the
+  signed path, the status, the time in ms, the `Dominaite-Request-Id` and the idempotency
+  key. No line holds the secret, a signature, a `cashierToken`, a query string or a body.
+
 ## 0.5.2
 
 ### Added

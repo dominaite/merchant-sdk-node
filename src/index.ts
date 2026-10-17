@@ -1,4 +1,4 @@
-export { DominaiteClient } from './client.js'
+export { DominaiteClient, PRODUCTION_BASE_URL, SANDBOX_BASE_URL } from './client.js'
 export {
   ApiError,
   AUTHORIZATION_ERROR_CODES,

@@ -43,7 +43,12 @@ import type {
   WebhookEndpoint,
 } from './types.js'
 
-const DEFAULT_BASE_URL = 'https://api.dominaite.com/payments'
+/** The sandbox merchant API. Pass it as `baseUrl` while you integrate. */
+export const SANDBOX_BASE_URL = 'https://api.staging.dominaite.com/payments'
+/** The production merchant API. Pass it as `baseUrl` to take live payments. */
+export const PRODUCTION_BASE_URL = 'https://api.dominaite.com/payments'
+const BASE_URL_REQUIRED =
+  `baseUrl is required. Use ${SANDBOX_BASE_URL} for the sandbox or ${PRODUCTION_BASE_URL} for production.`
 const SESSIONS_PATH = '/merchant-api/checkout/sessions'
 const PAYMENT_METHODS_PATH = '/merchant-api/payment-methods'
 const PAYMENTS_PATH = '/merchant-api/payments'
@@ -54,7 +59,7 @@ const AGREEMENTS_PATH = '/merchant-api/agreements'
 const WEBHOOKS_PATH = '/merchant-api/webhooks'
 const TRANSACTIONS_PATH = '/merchant-api/transactions'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
-const SDK_VERSION = '0.5.2'
+const SDK_VERSION = '0.6.0'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /**
  * A payment method id is opaque (pm_...), so this only pins what keeps it a single path
@@ -79,6 +84,14 @@ const PLAINTEXT_ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
  * (a decline, an unknown outcome, a refusal) and arrives as ChargeError / RevokeError.
  */
 const GENERIC_FAILURE_STATUSES = new Set([400, 401, 403, 404, 429])
+/** Ping warns above this clock skew; the gateway rejects requests at 300 seconds. */
+const CLOCK_SKEW_WARNING_SECONDS = 60
+/** A Dominaite-Sdk-Notice value is cut to this length before it is read. */
+const MAX_NOTICE_LENGTH = 512
+/** A client warns for at most this many distinct notice values. */
+const MAX_SEEN_NOTICES = 32
+/** A Dominaite-Request-Id value is cut to this length in the debug line. */
+const MAX_REQUEST_ID_LENGTH = 128
 
 /** A parsed reply, whatever its status. Auth and rate-limit failures never get this far. */
 interface Reply {
@@ -103,6 +116,7 @@ interface Reply {
  *   const client = new DominaiteClient({
  *     keyId: process.env.DOMINAITE_KEY_ID,
  *     secret: process.env.DOMINAITE_SECRET,
+ *     baseUrl: process.env.DOMINAITE_BASE_URL, // required: SANDBOX_BASE_URL or PRODUCTION_BASE_URL
  *   })
  *   const session = await client.createCheckoutSession({
  *     amount: 2500,                  // minor units: 25.00 EUR
@@ -126,6 +140,11 @@ export class DominaiteClient {
   readonly #baseUrl: string
   readonly #timeoutMs: number
   readonly #fetch: typeof globalThis.fetch
+  readonly #userAgent: string
+  readonly #onWarning: ((message: string) => void) | undefined
+  readonly #onDebug: ((line: string) => void) | undefined
+  /** The notice values this client has warned about, so each one warns once. */
+  readonly #seenNotices = new Set<string>()
 
   constructor(options: DominaiteClientOptions) {
     if (!options?.keyId?.startsWith('dmk_')) {
@@ -137,8 +156,11 @@ export class DominaiteClient {
 
     this.#keyId = options.keyId
     this.#secret = options.secret
-    this.#baseUrl = normalizeBaseUrl(options.baseUrl ?? DEFAULT_BASE_URL)
+    this.#baseUrl = normalizeBaseUrl(options.baseUrl)
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    this.#userAgent = buildUserAgent(options.userAgent)
+    this.#onWarning = optionalCallback(options.onWarning, 'onWarning')
+    this.#onDebug = optionalCallback(options.onDebug, 'onDebug')
 
     const fetchImpl = options.fetch ?? globalThis.fetch
     if (typeof fetchImpl !== 'function') {
@@ -158,8 +180,15 @@ export class DominaiteClient {
    */
   async ping(): Promise<Ping> {
     // GET signs an EMPTY idempotency key and an EMPTY body.
-    const response = await this.#request('GET', PING_PATH, null, '')
-    return response as Ping
+    const response = (await this.#request('GET', PING_PATH, null, '')) as unknown as Ping
+    const skew = Number(response.clockSkewSeconds)
+    if (Number.isFinite(skew) && Math.abs(skew) > CLOCK_SKEW_WARNING_SECONDS) {
+      this.#warn(
+        `dominaite-node: clock skew is ${skew} s; requests fail at 300 s. Sync this server's clock.`,
+        'DominaiteWarning',
+      )
+    }
+    return response
   }
 
   /**
@@ -263,6 +292,11 @@ export class DominaiteClient {
         }
         lastError = error
         if (attempt < attempts - 1) {
+          const reason = error instanceof CheckoutRefusedError ? error.errorCode : error.name
+          this.#warn(
+            `dominaite-node: retrying createCheckoutSessionWithRetry after ${reason} (attempt ${attempt + 2} of ${attempts})`,
+            'DominaiteWarning',
+          )
           await delay(baseDelayMs * 2 ** attempt)
         }
       }
@@ -785,6 +819,34 @@ export class DominaiteClient {
     idempotencyKey: string,
     query = '',
   ): Promise<Reply> {
+    const started = performance.now()
+    const outcome: Outcome = { status: 'error', requestId: null }
+    try {
+      return await this.#exchange(method, path, body, idempotencyKey, query, outcome)
+    } finally {
+      if (this.#onDebug !== undefined) {
+        // The signed path only: no query string, no base URL, no body, no signature.
+        let line = `dominaite-node: ${method} ${path} ${outcome.status} ${Math.round(performance.now() - started)}ms`
+        if (outcome.requestId !== null && outcome.requestId !== '') {
+          line += ` request_id=${outcome.requestId}`
+        }
+        if (idempotencyKey !== '') {
+          line += ` idempotency_key=${idempotencyKey}`
+        }
+        callSafely(this.#onDebug, line)
+      }
+    }
+  }
+
+  /** One signed round trip. Records the status and the request id in `outcome` for the debug line. */
+  async #exchange(
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+    path: string,
+    body: string | null,
+    idempotencyKey: string,
+    query: string,
+    outcome: Outcome,
+  ): Promise<Reply> {
     const json = body ?? ''
     const timestamp = Math.floor(Date.now() / 1000).toString()
     const signature = signRequest({
@@ -799,7 +861,7 @@ export class DominaiteClient {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       // Some edges block requests without a real User-Agent - always send one.
-      'User-Agent': `dominaite-node/${SDK_VERSION} (node ${process.version})`,
+      'User-Agent': this.#userAgent,
       'X-Api-Key-Id': this.#keyId,
       'X-Timestamp': timestamp,
       'X-Signature': signature,
@@ -824,6 +886,11 @@ export class DominaiteClient {
     } catch (error) {
       throw new TransportError(`Could not reach the Dominaite API: ${describe(error)}`)
     }
+
+    // Every response, whatever its status or body, before anything below can throw.
+    outcome.status = response.status
+    outcome.requestId = cleanHeader(response.headers?.get('Dominaite-Request-Id'), MAX_REQUEST_ID_LENGTH)
+    this.#readNotice(response.headers?.get('Dominaite-Sdk-Notice'))
 
     // Node hands back the real 3xx here; a spec-compliant runtime hands back an opaque
     // redirect instead - status 0, no body. Both mean the same thing.
@@ -895,6 +962,103 @@ export class DominaiteClient {
     }
 
     return { status: response.status, envelope, payload, error: envelopeError }
+  }
+
+  /** Warns once per distinct Dominaite-Sdk-Notice value. A missing header does nothing. */
+  #readNotice(header: string | null | undefined): void {
+    const value = cleanHeader(header, MAX_NOTICE_LENGTH)
+    if (value === null || value === '' || this.#seenNotices.has(value)) {
+      return
+    }
+    if (this.#seenNotices.size >= MAX_SEEN_NOTICES) {
+      return
+    }
+    this.#seenNotices.add(value)
+    const notice = describeNotice(value)
+    this.#warn(notice.message, notice.deprecated ? 'DeprecationWarning' : 'DominaiteWarning')
+  }
+
+  /** Hands one warning to onWarning, or to process.emitWarning. A sink that throws is ignored. */
+  #warn(message: string, type: 'DeprecationWarning' | 'DominaiteWarning'): void {
+    if (this.#onWarning !== undefined) {
+      callSafely(this.#onWarning, message)
+      return
+    }
+    try {
+      process.emitWarning(message, { type, code: 'DOMINAITE_SDK' })
+    } catch {
+      // A warning must never fail the request (for example under --throw-deprecation).
+    }
+  }
+}
+
+/** What #send learns from the response, for the debug line. */
+interface Outcome {
+  status: number | 'error'
+  requestId: string | null
+}
+
+/**
+ * The warning for one Dominaite-Sdk-Notice value, for example
+ * `deprecated; current="0.7.0"; sunset="2027-01-31"; info="https://..."`. sunset and info
+ * are optional. Any first token other than `deprecated` is passed on as it came.
+ */
+function describeNotice(value: string): { message: string; deprecated: boolean } {
+  const parts = value.split(';').map((part) => part.trim())
+  if ((parts[0] ?? '').toLowerCase() !== 'deprecated') {
+    return { message: `dominaite-node ${SDK_VERSION}: ${value}`, deprecated: false }
+  }
+  const params: Record<string, string> = {}
+  for (const part of parts.slice(1)) {
+    const equals = part.indexOf('=')
+    if (equals <= 0) {
+      continue
+    }
+    let paramValue = part.slice(equals + 1).trim()
+    if (paramValue.length >= 2 && paramValue.startsWith('"') && paramValue.endsWith('"')) {
+      paramValue = paramValue.slice(1, -1)
+    }
+    params[part.slice(0, equals).trim().toLowerCase()] = paramValue
+  }
+  let message = `dominaite-node ${SDK_VERSION} is deprecated`
+  if (params['current']) {
+    message += `; upgrade to ${params['current']}`
+  }
+  if (params['sunset']) {
+    message += ` (sunset ${params['sunset']})`
+  }
+  message += '.'
+  if (params['info']) {
+    message += ` ${params['info']}`
+  }
+  return { message, deprecated: true }
+}
+
+/** A response header cut to `max` characters, without control characters. Null when absent. */
+function cleanHeader(value: string | null | undefined, max: number): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  return value.slice(0, max).replace(/[\u0000-\u001f\u007f]/g, '').trim()
+}
+
+/** A caller's hook: a function, or undefined when not set. */
+function optionalCallback<T extends (value: string) => void>(value: T | undefined | null, name: string): T | undefined {
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  if (typeof value !== 'function') {
+    throw new TypeError(`${name} must be a function`)
+  }
+  return value
+}
+
+/** Calls a caller's hook. A hook that throws must never fail the request. */
+function callSafely(hook: (value: string) => void, value: string): void {
+  try {
+    hook(value)
+  } catch {
+    // Ignored on purpose: logging is not allowed to break a payment call.
   }
 }
 
@@ -1275,17 +1439,45 @@ function encodeBody(bodyParams: Record<string, unknown>): string {
 }
 
 /**
- * Strips trailing slashes and refuses anything that would put a signed request on the
- * wire in the clear. http:// is allowed only for the loopback names a developer runs a
- * local gateway on; everywhere else the API key id, timestamp and signature would be
- * readable by anything on the path, and the reply would be forgeable.
+ * Requires a base URL, strips whitespace and trailing slashes, and refuses anything that
+ * would put a signed request on the wire in the clear. There is no default: a missing
+ * value (an unset environment variable, say) must not quietly send sandbox credentials to
+ * production. http:// is allowed only for the loopback names a developer runs a local
+ * gateway on; everywhere else the API key id, timestamp and signature would be readable
+ * by anything on the path, and the reply would be forgeable.
  */
-function normalizeBaseUrl(baseUrl: string): string {
-  if (typeof baseUrl !== 'string' || baseUrl === '') {
+/**
+ * `dominaite-node/<version> (node <version>)`, then the caller's suffix after one space. The
+ * operating system is left out on purpose. A suffix with a control character is refused: it
+ * would let a caller split the header.
+ */
+function buildUserAgent(suffix: string | undefined | null): string {
+  const base = `dominaite-node/${SDK_VERSION} (node ${process.versions.node})`
+  if (suffix === undefined || suffix === null) {
+    return base
+  }
+  if (typeof suffix !== 'string') {
+    throw new TypeError('userAgent must be a string')
+  }
+  if (/[\u0000-\u001f\u007f]/.test(suffix)) {
+    throw new TypeError('userAgent must not contain control characters')
+  }
+  const trimmed = suffix.trim()
+  return trimmed === '' ? base : `${base} ${trimmed}`
+}
+
+function normalizeBaseUrl(baseUrl: string | undefined | null): string {
+  if (baseUrl === undefined || baseUrl === null) {
+    throw new TypeError(BASE_URL_REQUIRED)
+  }
+  if (typeof baseUrl !== 'string') {
     throw new TypeError('baseUrl must be a URL string')
   }
 
-  const trimmed = baseUrl.replace(/\/+$/, '')
+  const trimmed = baseUrl.trim().replace(/\/+$/, '')
+  if (trimmed === '') {
+    throw new TypeError(BASE_URL_REQUIRED)
+  }
 
   let parsed: URL
   try {
