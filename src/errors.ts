@@ -2,10 +2,25 @@ import type { PaymentMethodCharge } from './types.js'
 
 /** Base class for every error this SDK throws. */
 export class DominaiteError extends Error {
+  /**
+   * The API's id for the request that failed: the Dominaite-Request-Id header, or
+   * metadata.requestId from the body when the header is absent. Quote it to Dominaite
+   * support. Null when no answer arrived or the answer carried no id.
+   */
+  readonly requestId: string | null = null
+
   constructor(message: string) {
     super(message)
     this.name = new.target.name
   }
+}
+
+/** Sets the request id on an error the client is about to throw. Keeps one already set. */
+export function withRequestId<T>(error: T, requestId: string | null): T {
+  if (error instanceof DominaiteError && error.requestId === null && requestId !== null) {
+    ;(error as { requestId: string | null }).requestId = requestId
+  }
+  return error
 }
 
 /**

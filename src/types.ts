@@ -117,6 +117,32 @@ export interface CreateCheckoutSessionParams {
   [key: string]: unknown
 }
 
+/**
+ * What every result of a client call carries besides its own fields. `requestId` is
+ * non-enumerable: read it directly, it stays out of JSON.stringify and object spreads.
+ */
+export interface ResponseMetadata {
+  /**
+   * The API's id for the request that returned this object: the Dominaite-Request-Id header,
+   * or metadata.requestId from the body when the header is absent. Quote it to Dominaite
+   * support. Null when the answer carried no id; absent on an object you built yourself.
+   */
+  readonly requestId?: string | null
+}
+
+// Every result carries the request id. Declared apart from each result's own fields.
+export interface CheckoutSession extends ResponseMetadata {}
+export interface CheckoutStatus extends ResponseMetadata {}
+export interface PaymentMethodCharge extends ResponseMetadata {}
+export interface Refund extends ResponseMetadata {}
+export interface RefundList extends ResponseMetadata {}
+export interface Plan extends ResponseMetadata {}
+export interface Agreement extends ResponseMetadata {}
+export interface WebhookEndpoint extends ResponseMetadata {}
+export interface TransactionPage extends ResponseMetadata {}
+export interface IntegrationContract extends ResponseMetadata {}
+export interface Ping extends ResponseMetadata {}
+
 /** What {@link DominaiteClient.createCheckoutSession} returns. */
 export interface CheckoutSession {
   transactionId: string

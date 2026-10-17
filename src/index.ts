@@ -102,6 +102,7 @@ export type {
   Refund,
   RefundList,
   RefundStatus,
+  ResponseMetadata,
   RetryOptions,
   StoredPaymentMethod,
   StoredPaymentMethodRetiredReason,

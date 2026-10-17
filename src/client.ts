@@ -15,6 +15,7 @@ import {
   StorefrontError,
   type StorefrontErrorCode,
   TransportError,
+  withRequestId,
 } from './errors.js'
 import { countCodePoints, MAX_FIELD_CODE_POINTS, normalizeIdempotencyKey } from './idempotency.js'
 import { signRequest } from './signing.js'
@@ -114,6 +115,8 @@ const MAX_REQUEST_ID_LENGTH = 128
 /** A parsed reply, whatever its status. Auth and rate-limit failures never get this far. */
 interface Reply {
   status: number
+  /** The Dominaite-Request-Id header, or metadata.requestId from the body. Null when neither. */
+  requestId: string | null
   /** The whole JSON body ({} for a 204). */
   envelope: Record<string, unknown>
   /** envelope.data when the gateway wrapped the answer, the envelope itself otherwise. */
@@ -198,7 +201,8 @@ export class DominaiteClient {
    */
   async ping(): Promise<Ping> {
     // GET signs an EMPTY idempotency key and an EMPTY body.
-    const response = (await this.#request('GET', PING_PATH, null, '')) as unknown as Ping
+    const reply = await this.#request('GET', PING_PATH, null, '')
+    const response = withMeta(reply.payload as unknown as Ping, reply)
     const skew = Number(response.clockSkewSeconds)
     if (Number.isFinite(skew) && Math.abs(skew) > CLOCK_SKEW_WARNING_SECONDS) {
       this.#warn(
@@ -221,7 +225,7 @@ export class DominaiteClient {
     // does not check the signature, but sending it costs nothing.
     const reply = await this.#send('GET', INTEGRATION_CONTRACT_PATH, null, '')
     const data = readObject(reply, 'contract')
-    return { ...data, version: stringOr(data['version'], '') }
+    return withMeta({ ...data, version: stringOr(data['version'], '') }, reply)
   }
 
   /**
@@ -260,20 +264,23 @@ export class DominaiteClient {
       // A storefront-bound key replayed for another storefront is refused at HTTP 200. It is
       // the same configuration problem as the 400, so it gets the same error.
       if (isStorefrontErrorCode(errorCode)) {
-        throw new StorefrontError(reply.status, errorCode, errorMessage, reply.envelope)
+        throw withRequestId(new StorefrontError(reply.status, errorCode, errorMessage, reply.envelope), reply.requestId)
       }
       // A replay refusal names the transaction your key collided with. Carry it (and
       // the whole payload) so the caller can reconcile with getStatus() instead of
       // minting a second payment for the same order.
-      throw new CheckoutRefusedError(
-        errorCode,
-        errorMessage,
-        typeof response['transactionId'] === 'string' ? response['transactionId'] : undefined,
-        response,
+      throw withRequestId(
+        new CheckoutRefusedError(
+          errorCode,
+          errorMessage,
+          typeof response['transactionId'] === 'string' ? response['transactionId'] : undefined,
+          response,
+        ),
+        reply.requestId,
       )
     }
 
-    return response['checkout'] as CheckoutSession
+    return withMeta(response['checkout'] as CheckoutSession, reply)
   }
 
   /**
@@ -361,15 +368,16 @@ export class DominaiteClient {
     }
 
     // GET signs an EMPTY idempotency key and an EMPTY body.
-    const response = await this.#request('GET', `${SESSIONS_PATH}/${normalized}`, null, '')
+    const reply = await this.#request('GET', `${SESSIONS_PATH}/${normalized}`, null, '')
+    const response = reply.payload
     // Passed through as sent, except the card on file: the gateway omits its null fields
     // on the wire, and the caller gets one shape for it, not two. When the gateway sent no
     // storedPaymentMethod at all there is no key here either (there is no card).
     const stored = response['storedPaymentMethod']
     if (isPlainObject(stored)) {
-      return { ...response, storedPaymentMethod: toStoredPaymentMethod(stored) } as CheckoutStatus
+      return withMeta({ ...response, storedPaymentMethod: toStoredPaymentMethod(stored) } as CheckoutStatus, reply)
     }
-    return response as CheckoutStatus
+    return withMeta(response as CheckoutStatus, reply)
   }
 
   /**
@@ -421,7 +429,7 @@ export class DominaiteClient {
     // provider declined; the envelope says success=false but the charge is right there,
     // status 'failed' with its decline class, so it is a result, not an exception.
     if (charge !== undefined && (reply.envelope['success'] === true || reply.status === 402)) {
-      return charge
+      return withMeta(charge, reply)
     }
 
     if (
@@ -431,18 +439,21 @@ export class DominaiteClient {
       !isStorefrontErrorCode(errorCode) &&
       !(reply.status >= 500 && isGenericServerCode(errorCode, CHARGE_ERROR_CODES))
     ) {
-      throw new ChargeError(
-        reply.status,
-        errorCode,
-        stringOr(reply.error['message'], 'The charge was refused.'),
-        charge,
-        reply.envelope,
+      throw withRequestId(
+        new ChargeError(
+          reply.status,
+          errorCode,
+          stringOr(reply.error['message'], 'The charge was refused.'),
+          charge,
+          reply.envelope,
+        ),
+        reply.requestId,
       )
     }
     if (reply.status >= 400) {
       throw rejection(reply)
     }
-    throw new ApiError(reply.status, 'The API answered the charge without a charge body')
+    throw withRequestId(new ApiError(reply.status, 'The API answered the charge without a charge body'), reply.requestId)
   }
 
   /**
@@ -471,11 +482,9 @@ export class DominaiteClient {
       !GENERIC_REVOKE_FAILURE_STATUSES.has(reply.status) &&
       !(reply.status >= 500 && isGenericServerCode(errorCode, REVOKE_ERROR_CODES))
     ) {
-      throw new RevokeError(
-        reply.status,
-        errorCode,
-        stringOr(reply.error['message'], 'The revoke was refused.'),
-        reply.envelope,
+      throw withRequestId(
+        new RevokeError(reply.status, errorCode, stringOr(reply.error['message'], 'The revoke was refused.'), reply.envelope),
+        reply.requestId,
       )
     }
     throw rejection(reply)
@@ -541,14 +550,14 @@ export class DominaiteClient {
     const reply = await this.#send('GET', `${PAYMENTS_PATH}/${id}/refunds`, null, '')
     const data = reply.envelope['data']
     if (reply.status < 300 && isPlainObject(data) && Array.isArray(data['refunds'])) {
-      return {
+      return withMeta({
         ...data,
         transactionId: stringOr(data['transactionId'], ''),
         currency: stringOr(data['currency'], ''),
         refundedAmount: typeof data['refundedAmount'] === 'number' ? data['refundedAmount'] : 0,
         refundableAmount: typeof data['refundableAmount'] === 'number' ? data['refundableAmount'] : 0,
         refunds: data['refunds'].filter(isPlainObject).map(toRefund),
-      }
+      }, reply)
     }
     throw refundFailure(reply, 'The API answered the refund list without a list body')
   }
@@ -566,7 +575,7 @@ export class DominaiteClient {
   async createPlan(params: CreatePlanParams): Promise<Plan> {
     const { idempotencyKey, body } = prepareKeyedBody(params)
     const reply = await this.#send('POST', PLANS_PATH, body, idempotencyKey)
-    return toPlan(readObject(reply, 'plan'))
+    return withMeta(toPlan(readObject(reply, 'plan')), reply)
   }
 
   /**
@@ -578,7 +587,7 @@ export class DominaiteClient {
   async listPlans(): Promise<Plan[]> {
     // GET signs an EMPTY idempotency key and an EMPTY body.
     const reply = await this.#send('GET', PLANS_PATH, null, '')
-    return readArray(reply, 'plan list').map(toPlan)
+    return readArray(reply, 'plan list').map((plan) => withMeta(toPlan(plan), reply))
   }
 
   /**
@@ -591,7 +600,7 @@ export class DominaiteClient {
   async getPlan(planId: string): Promise<Plan> {
     const id = normalizeHandle(planId, 'planId', 'the plan_ id returned by createPlan()')
     const reply = await this.#send('GET', `${PLANS_PATH}/${id}`, null, '')
-    return toPlan(readObject(reply, 'plan'))
+    return withMeta(toPlan(readObject(reply, 'plan')), reply)
   }
 
   /**
@@ -615,7 +624,7 @@ export class DominaiteClient {
     // No key signs an EMPTY key and sends no Idempotency-Key header.
     const idempotencyKey = providedKey === undefined || providedKey === null ? '' : normalizeIdempotencyKey(providedKey)
     const reply = await this.#send('PATCH', `${PLANS_PATH}/${id}`, encodeBody(bodyParams), idempotencyKey)
-    return toPlan(readObject(reply, 'plan'))
+    return withMeta(toPlan(readObject(reply, 'plan')), reply)
   }
 
   /**
@@ -652,7 +661,7 @@ export class DominaiteClient {
   async createAgreement(params: CreateAgreementParams): Promise<Agreement> {
     const { idempotencyKey, body } = prepareKeyedBody(params)
     const reply = await this.#send('POST', AGREEMENTS_PATH, body, idempotencyKey)
-    return toAgreement(readObject(reply, 'agreement'))
+    return withMeta(toAgreement(readObject(reply, 'agreement')), reply)
   }
 
   /**
@@ -666,7 +675,7 @@ export class DominaiteClient {
   async getAgreement(agreementId: string): Promise<Agreement> {
     const id = normalizeHandle(agreementId, 'agreementId', 'the agr_ id returned by createAgreement()')
     const reply = await this.#send('GET', `${AGREEMENTS_PATH}/${id}`, null, '')
-    return toAgreement(readObject(reply, 'agreement'))
+    return withMeta(toAgreement(readObject(reply, 'agreement')), reply)
   }
 
   /**
@@ -709,7 +718,7 @@ export class DominaiteClient {
     const { idempotencyKey, body } = prepareKeyedBody(params)
     const reply = await this.#send('POST', WEBHOOKS_PATH, body, idempotencyKey)
     const data = readObject(reply, 'webhook endpoint')
-    return { ...toWebhookEndpoint(data), secret: stringOrNull(data['secret']) }
+    return withMeta({ ...toWebhookEndpoint(data), secret: stringOrNull(data['secret']) }, reply)
   }
 
   /**
@@ -723,7 +732,7 @@ export class DominaiteClient {
   async listWebhookEndpoints(): Promise<WebhookEndpoint[]> {
     // GET signs an EMPTY idempotency key and an EMPTY body.
     const reply = await this.#send('GET', WEBHOOKS_PATH, null, '')
-    return readArray(reply, 'webhook endpoint list').map(toWebhookEndpoint)
+    return readArray(reply, 'webhook endpoint list').map((endpoint) => withMeta(toWebhookEndpoint(endpoint), reply))
   }
 
   /**
@@ -778,11 +787,14 @@ export class DominaiteClient {
     const reply = await this.#send('GET', TRANSACTIONS_PATH, null, '', query)
     const data = readObject(reply, 'transaction page')
     const items = data['items']
-    return {
-      ...data,
-      items: Array.isArray(items) ? items.filter(isPlainObject).map(toTransaction) : [],
-      nextCursor: stringOrNull(data['nextCursor']),
-    }
+    return withMeta(
+      {
+        ...data,
+        items: Array.isArray(items) ? items.filter(isPlainObject).map(toTransaction) : [],
+        nextCursor: stringOrNull(data['nextCursor']),
+      },
+      reply,
+    )
   }
 
   #prepareSessionRequest(params: CreateCheckoutSessionParams): { idempotencyKey: string; body: string } {
@@ -833,12 +845,12 @@ export class DominaiteClient {
     path: string,
     body: string | null,
     idempotencyKey: string,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<Reply> {
     const reply = await this.#send(method, path, body, idempotencyKey)
     if (reply.status >= 400) {
       throw rejection(reply)
     }
-    return reply.payload
+    return reply
   }
 
   /**
@@ -858,6 +870,8 @@ export class DominaiteClient {
     const outcome: Outcome = { status: 'error', requestId: null }
     try {
       return await this.#exchange(method, path, body, idempotencyKey, query, outcome)
+    } catch (error) {
+      throw withRequestId(error, outcome.requestId === '' ? null : outcome.requestId)
     } finally {
       if (this.#onDebug !== undefined) {
         // The signed path only: no query string, no base URL, no body, no signature.
@@ -942,7 +956,7 @@ export class DominaiteClient {
 
     // 204 carries nothing to parse; the status is the whole answer.
     if (response.status === 204) {
-      return { status: 204, envelope: {}, payload: {}, error: {} }
+      return { status: 204, requestId: outcome.requestId || null, envelope: {}, payload: {}, error: {} }
     }
 
     let raw: string
@@ -970,6 +984,12 @@ export class DominaiteClient {
     const envelope = decoded as Record<string, unknown>
     const payload = isPlainObject(envelope['data']) ? envelope['data'] : envelope
     const envelopeError = isPlainObject(envelope['error']) ? envelope['error'] : {}
+    // The header wins; an API that does not send it yet still has the id in the body.
+    if (!outcome.requestId) {
+      const metadata = envelope['metadata']
+      outcome.requestId = isPlainObject(metadata) ? cleanHeader(asString(metadata['requestId']), MAX_REQUEST_ID_LENGTH) : null
+    }
+    const requestId = outcome.requestId || null
 
     if (response.status === 401 || response.status === 403) {
       const errorCode = stringOr(payload['errorCode'], stringOr(envelopeError['code'], 'UNAUTHORIZED'))
@@ -996,7 +1016,7 @@ export class DominaiteClient {
       )
     }
 
-    return { status: response.status, envelope, payload, error: envelopeError }
+    return { status: response.status, requestId, envelope, payload, error: envelopeError }
   }
 
   /** Warns once per distinct Dominaite-Sdk-Notice value. A missing header does nothing. */
@@ -1132,17 +1152,20 @@ function rejection(reply: Reply): DominaiteError {
   // IDEMPOTENCY_KEY_REQUIRED is only actionable if the caller can branch on it.
   const errorCode = stringOr(reply.payload['errorCode'], stringOr(reply.error['code'], ''))
   if (reply.status >= 500) {
-    return new TransportError(
+    return withRequestId(new TransportError(
       `The Dominaite API is unavailable (HTTP ${reply.status}${errorCode === '' ? '' : ` ${errorCode}`}); ` +
         'retry with the same idempotency key.',
       { httpStatus: reply.status, errorCode: errorCode === '' ? undefined : errorCode, result: reply.envelope },
-    )
+    ), reply.requestId)
   }
   const message = stringOr(reply.payload['errorMessage'], stringOr(reply.error['message'], 'Request rejected'))
   if (isStorefrontErrorCode(errorCode)) {
-    return new StorefrontError(reply.status, errorCode, message, reply.envelope)
+    return withRequestId(new StorefrontError(reply.status, errorCode, message, reply.envelope), reply.requestId)
   }
-  return new ApiError(reply.status, message, errorCode === '' ? undefined : errorCode, reply.envelope)
+  return withRequestId(
+    new ApiError(reply.status, message, errorCode === '' ? undefined : errorCode, reply.envelope),
+    reply.requestId,
+  )
 }
 
 /**
@@ -1152,7 +1175,7 @@ function rejection(reply: Reply): DominaiteError {
 function readRefund(reply: Reply): Refund {
   const data = reply.envelope['data']
   if (reply.status < 300 && isPlainObject(data) && typeof data['refundId'] === 'string') {
-    return toRefund(data)
+    return withMeta(toRefund(data), reply)
   }
 
   throw refundFailure(reply, 'The API answered the refund without a refund body')
@@ -1162,17 +1185,15 @@ function readRefund(reply: Reply): Refund {
 function refundFailure(reply: Reply, noBodyMessage: string): DominaiteError {
   const errorCode = stringOr(reply.error['code'], '')
   if (reply.status >= 400 && reply.status < 500 && isRefundErrorCode(errorCode)) {
-    return new RefundError(
-      reply.status,
-      errorCode,
-      stringOr(reply.error['message'], 'The refund was refused.'),
-      reply.envelope,
+    return withRequestId(
+      new RefundError(reply.status, errorCode, stringOr(reply.error['message'], 'The refund was refused.'), reply.envelope),
+      reply.requestId,
     )
   }
   if (reply.status >= 400) {
     return rejection(reply)
   }
-  return new ApiError(reply.status, noBodyMessage, undefined, reply.envelope)
+  return withRequestId(new ApiError(reply.status, noBodyMessage, undefined, reply.envelope), reply.requestId)
 }
 
 function isRefundErrorCode(code: string): code is RefundErrorCode {
@@ -1297,7 +1318,10 @@ function readObject(reply: Reply, what: string): Record<string, unknown> {
   if (reply.status >= 400) {
     throw rejection(reply)
   }
-  throw new ApiError(reply.status, `The API answered without a ${what} body`, undefined, reply.envelope)
+  throw withRequestId(
+    new ApiError(reply.status, `The API answered without a ${what} body`, undefined, reply.envelope),
+    reply.requestId,
+  )
 }
 
 /** The objects in envelope.data of a 2xx reply when it is an array; the rejection otherwise. */
@@ -1309,7 +1333,10 @@ function readArray(reply: Reply, what: string): Record<string, unknown>[] {
   if (reply.status >= 400) {
     throw rejection(reply)
   }
-  throw new ApiError(reply.status, `The API answered without a ${what}`, undefined, reply.envelope)
+  throw withRequestId(
+    new ApiError(reply.status, `The API answered without a ${what}`, undefined, reply.envelope),
+    reply.requestId,
+  )
 }
 
 function toPlan(data: Record<string, unknown>): Plan {
@@ -1611,6 +1638,19 @@ function parseRetryAfterSeconds(value: string | null | undefined): number | null
   }
   const seconds = Number(trimmed)
   return Number.isSafeInteger(seconds) ? seconds : null
+}
+
+/**
+ * Puts the reply's request id on a result as a read-only, non-enumerable requestId: it is
+ * there to read, and stays out of JSON.stringify, object spreads and deep equality.
+ */
+function withMeta<T extends object>(value: T, reply: Reply): T {
+  Object.defineProperty(value, 'requestId', { value: reply.requestId, enumerable: false, configurable: true })
+  return value
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
