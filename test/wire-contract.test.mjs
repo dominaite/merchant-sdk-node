@@ -90,6 +90,18 @@ test('the status response carries every wallet reporting field, optional and nul
   }
 })
 
+test('the agreement and charge webhook event types are exactly the recurring events the gateway publishes', () => {
+  const eventTypes = (name) => {
+    const line = DECLARATIONS.match(new RegExp(`^export type ${name} = WebhookEvent<([^>]*), \\w+>;$`, 'm'))
+    assert.ok(line, name)
+    return [...line[1].matchAll(/'([^']+)'/g)].map((match) => match[1])
+  }
+  assert.deepEqual(
+    sorted([...eventTypes('AgreementWebhookEvent'), ...eventTypes('ChargeWebhookEvent')]),
+    sorted(WIRE.recurringWebhookEvents),
+  )
+})
+
 test('the contract still lists this SDK', () => {
   assert.ok(WIRE.sdks.includes('node'))
 })
