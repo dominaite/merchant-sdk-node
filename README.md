@@ -1103,11 +1103,12 @@ A retry of a create that did succeed would answer `secret: null`, and the secret
 
 The answer carries the signing secret one time only. Store it at once. A repeat with the same
 idempotency key answers the same endpoint with `secret: null`, and no other route shows the
-secret. If you lose the secret, delete the endpoint and create a new one.
+secret. If you lose the secret, delete the endpoint and create it again with a new key.
 
-A create that got no answer can still have registered the endpoint. Repeat it with the same key.
-If the first create did not finish, the API replaces its endpoint and answers a new `id` and
-`secret`. If it did finish, you get the repeat answer with `secret: null`. When you use a key
+A create that got no answer (a timeout or a 5xx) can still have registered the endpoint. Repeat
+it with the same key. The answer can come back with `secret: null`: the first create did
+finish, and only its answer was lost. Then delete that endpoint and create it again with a new
+key. A same-key repeat does not always answer a new secret. When you use a key
 again more than a day later and its endpoint still exists, the call throws `ApiError` with
 `errorCode` `WEBHOOK_ALREADY_REGISTERED`. `error.result.error.params.webhookId` names that
 endpoint.

@@ -773,7 +773,8 @@ export interface CreatedWebhookEndpoint extends WebhookEndpoint {
   /**
    * The whsec_ signing secret for verifyWebhook(). Only the first answer carries it: a
    * repeat with the same key answers the same endpoint with secret null. Store it at once.
-   * No route shows it again; to replace a lost secret, delete the endpoint and create a new one.
+   * No route shows it again; to replace a lost secret, delete the endpoint and create it
+   * again with a new key.
    */
   secret: string | null
 }

@@ -719,8 +719,8 @@ export class DominaiteClient {
    * it. For that reason the client sends this call once and never retries it, whatever
    * maxRetries says: a retry after an answer that was lost on the way would come back
    * with secret null. A create that got no answer, a timeout or a 5xx may still have
-   * registered the endpoint, so repeat it with the SAME key: that replaces the unanswered
-   * endpoint and answers a fresh id and secret.
+   * registered the endpoint, so repeat it with the SAME key. If that answer has no secret,
+   * delete that endpoint and create it again with a NEW key.
    *
    * Throws ApiError: WEBHOOK_URL_REJECTED (400) for a URL that is not HTTPS on a public
    * host; WEBHOOK_LIMIT_REACHED (409) at 25 active endpoints; WEBHOOK_ALREADY_REGISTERED
