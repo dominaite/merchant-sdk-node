@@ -9,15 +9,23 @@
   `PAYMENT_PROCESSING_UNAVAILABLE`, up to `maxRetries` times (default 2). Each attempt sends the
   same idempotency key and body. The wait is random between 0 and 500 ms times 2 per attempt,
   at most 8 seconds. A 429 is never retried. Pass `maxRetries: 0` to keep the old behaviour.
+  `timeoutMs` applies to each attempt, so one call can now take up to
+  `(maxRetries + 1) x timeoutMs`, plus the waits between attempts.
+  A charge's own answer on a 5xx (`CHARGE_OUTCOME_UNKNOWN`, `CHARGE_FAILED`,
+  `PAYMENT_METHOD_CHARGES_DISABLED`) is a `ChargeError` and is not retried; only
+  `PAYMENT_PROCESSING_UNAVAILABLE` on a charge is. `createWebhookEndpoint` is never retried,
+  because a replay answers `secret: null`. A response body over 10MB is not retried either.
 - A coded 404 from `chargePaymentMethod` (`PAYMENT_METHOD_NOT_FOUND`, `AGREEMENT_NOT_FOUND`) is
   a `ChargeError`, not an `ApiError`. `ChargeError` now extends `ApiError`, so
-  `instanceof ApiError` still matches.
+  `instanceof ApiError` still matches. Check the order of your `instanceof` tests or `catch`
+  branches: test `ChargeError` before `ApiError`, or the `ApiError` branch catches every charge
+  refusal.
 - A 5xx with a generic code (`INTERNAL_ERROR`, `SERVICE_UNAVAILABLE`) on a charge or a revoke is
   a `TransportError`, not a `ChargeError` or `RevokeError`. `MERCHANT_API_UNAVAILABLE` on a
   revoke stays a `RevokeError`.
 - A 5xx with a body that is not JSON is a `TransportError`, not an `ApiError`.
 - A checkout replay refused with `STOREFRONT_MISMATCH` at HTTP 200 throws `StorefrontError`, not
-  `CheckoutRefusedError`.
+  `CheckoutRefusedError`. Its `httpStatus` is 200.
 - `currency` must be three uppercase letters. The client throws `TypeError` before it sends.
 - Webhook types declare `kind`, `grossAmount` and `surchargeAmount` on payment events as
   nullable, because the API sends explicit nulls.
@@ -42,7 +50,9 @@
 ### Deprecated
 
 - `createCheckoutSessionWithRetry` and `RetryOptions`. The client retries on its own now. The
-  method still works and warns on each retry.
+  method still works and warns on each retry. Its wait between attempts is now full jitter
+  (random between 0 and `baseDelayMs * 2^attempt`, at most 8 seconds), not the fixed
+  `baseDelayMs * 2^attempt`.
 
 ## 0.6.0
 

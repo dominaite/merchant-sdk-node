@@ -240,7 +240,7 @@ Same API. Node's `require()` of this package resolves to the CJS build.
 |---|---|
 | `keyId`, `secret` | Required. Your API key id (`dmk_...`) and secret (`dms_...`). |
 | `baseUrl` | Required. `SANDBOX_BASE_URL` or `PRODUCTION_BASE_URL`, or your own value. Must be `https://`; plain `http://` only for localhost, 127.0.0.1 and ::1. |
-| `timeoutMs` | Per-request timeout. Defaults to 45000 (serverless cold starts can take 10+ s). |
+| `timeoutMs` | Timeout for one attempt. Defaults to 45000 (serverless cold starts can take 10+ s). With retries, one call can take up to `(maxRetries + 1) x timeoutMs`, plus the waits between attempts. |
 | `fetch` | Your own fetch, for a proxy or a test double. Defaults to the global fetch. |
 | `userAgent` | Your own identifier, for example `shop/1.2`. The SDK sends `dominaite-node/<version> (node <version>) shop/1.2`, which helps when support reads the access logs. A control character throws a `TypeError`. |
 | `onWarning` | Receives the SDK's warnings. See [Logging and warnings](#logging-and-warnings). |
@@ -365,6 +365,9 @@ timestamp, and so the signature, is new. The wait before retry `n` is random bet
 `500 ms * 2^(n-1)`, at most 8 seconds. When the retries run out, you get the last error as it
 arrived.
 
+`timeoutMs` applies to each attempt, not to the whole call. With the defaults (45 s, 2 retries)
+one call can take up to 3 x 45 s, plus the waits between attempts.
+
 ```js
 const client = new DominaiteClient({
   keyId: process.env.DOMINAITE_KEY_ID,
@@ -382,6 +385,9 @@ What the client does not retry:
 - **A charge's own answer on a 5xx.** `CHARGE_OUTCOME_UNKNOWN`, `CHARGE_FAILED` and
   `PAYMENT_METHOD_CHARGES_DISABLED` arrive as `ChargeError` at once. Only
   `PAYMENT_PROCESSING_UNAVAILABLE` on a charge is retried.
+- **`createWebhookEndpoint`.** The API returns the signing secret only on the first answer. A
+  retry after an answer that was lost on the way would come back with `secret: null`.
+- **A response body over 10MB.** The API did answer, so a retry would only replay it.
 - **DELETE and PATCH calls** (`revokePaymentMethod`, `deletePlan`, `cancelAgreement`,
   `deleteWebhookEndpoint`, `updatePlan`). They carry no idempotency key.
 - **Refusals, validation and authentication failures.** They will not change.
@@ -1092,6 +1098,9 @@ const endpoint = await client.createWebhookEndpoint({
 await saveSecret(endpoint.secret) // whsec_..., shown once
 ```
 
+The client sends `createWebhookEndpoint` once and never retries it, whatever `maxRetries` says.
+A retry of a create that did succeed would answer `secret: null`, and the secret would be lost.
+
 The answer carries the signing secret one time only. Store it at once. A repeat with the same
 idempotency key answers the same endpoint with `secret: null`, and no other route shows the
 secret. If you lose the secret, delete the endpoint and create a new one.
@@ -1187,7 +1196,7 @@ absent. It is `null` when no answer arrived. On a result it is non-enumerable, s
 | `RefundError` | A refund route refused with one of the refund codes. Extends `ApiError`; `retryable` says whether the same request can succeed later. | See [Refunds](#refunds). |
 | `AuthenticationError` | 401 with `INVALID_API_KEY`, `INVALID_SIGNATURE`, `TIMESTAMP_OUT_OF_RANGE` or `IP_NOT_ALLOWED`. 403 with `INSUFFICIENT_SCOPE` (the key does not hold the route's scope) or `VERIFY_ONLY_NOT_ENABLED`. `httpStatus` tells 401 from 403. | On 401, fix the key id, secret, server clock or allowlist. On `INSUFFICIENT_SCOPE`, use a key that holds the scope. On `VERIFY_ONLY_NOT_ENABLED`, ask us to switch verify-only on. Never retry-loop. |
 | `RateLimitError` | 429. `errorCode` says which limit: `RATE_LIMIT_EXCEEDED` (over 60 requests/min for the key or 120/min for the IP), `CHARGE_VELOCITY_EXCEEDED` or `CHARGE_DECLINE_RATE_EXCEEDED` (stored-card charges). `retryAfterSeconds` carries `Retry-After` when it was a whole number of seconds, else `null`. `result` is the whole answer. | Wait `retryAfterSeconds` (or your own backoff), then send it again with the **same** idempotency key. The SDK does not retry this for you. |
-| `TransportError` | Network failure, timeout, 5xx, or a response body over 10MB. On a 5xx, `httpStatus` is the status and `errorCode` the API's code when it sent one (`INTERNAL_ERROR`, `MERCHANT_API_UNAVAILABLE`). The client already retried it `maxRetries` times. | Retry later with the **same** idempotency key, and expect a replay refusal if the first attempt did land. |
+| `TransportError` | Network failure, timeout, 5xx, or a response body over 10MB. On a 5xx, `httpStatus` is the status and `errorCode` the API's code when it sent one (`INTERNAL_ERROR`, `MERCHANT_API_UNAVAILABLE`). The client already retried it `maxRetries` times, except for `createWebhookEndpoint`, a DELETE or PATCH call, and a body over 10MB, which it sends once. | Retry later with the **same** idempotency key, and expect a replay refusal if the first attempt did land. |
 | `ApiError` | Any other rejecting or unexpected response. `httpStatus` carries the HTTP status, `errorCode` the API's code when it sent one, and `result` the whole answer. | Inspect. A 422 means an idempotency key was replayed with a different body - use a fresh key. |
 | `ApiError` with a 3xx `httpStatus` | The host you called answered with a redirect. | The Dominaite API never redirects, so the SDK refuses to follow one: your signed headers would be handed to whatever `Location` names, and its answer would look authentic. Check `baseUrl` and any proxy in front of it. |
 | `TypeError` | Bad arguments (float amount, missing field or idempotency key, malformed key id). | Fix the call; nothing was sent. |
