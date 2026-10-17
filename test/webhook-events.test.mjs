@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import {
   parseWebhookEvent,
@@ -164,4 +166,44 @@ test('a payment event sent with verifyOnly false and declineClass null keeps bot
 
   assert.equal(event.data.verifyOnly, false)
   assert.equal(event.data.declineClass, null)
+})
+
+// Webhooks write nulls out (unlike the API replies, which omit them), so every data field the
+// gateway can send as null must be declared nullable, or a strict caller gets the wrong type.
+const DECLARATIONS = readFileSync(fileURLToPath(new URL('../dist/types/types.d.ts', import.meta.url)), 'utf8')
+
+function declaredLines(name) {
+  const start = DECLARATIONS.indexOf(`export interface ${name} {`)
+  assert.ok(start >= 0, name)
+  return DECLARATIONS.slice(start, DECLARATIONS.indexOf('\n}', start))
+}
+
+const NULLABLE_WEBHOOK_FIELDS = {
+  PaymentWebhookData: [
+    'previousStatus', 'kind', 'grossAmount', 'surchargeAmount', 'paymentMethod', 'walletType',
+    'originalTransactionId', 'idempotencyKey', 'orderReference', 'orderId', 'pspReference',
+    'description', 'paymentMethodBrand', 'paymentMethodLast4', 'storedPaymentMethod', 'declineClass',
+  ],
+  ChargeWebhookData: [
+    'agreementId', 'customerReference', 'periodNumber', 'orderReference', 'description',
+    'declineClass', 'declineCode', 'nextAttemptAt', 'nextChargeAt',
+  ],
+  AgreementWebhookData: [
+    'storedPaymentMethodId', 'previousStatus', 'periodCount', 'nextChargeAt', 'activatedAt', 'cancelledAt',
+  ],
+}
+
+test('every webhook data field the gateway sends as null is declared nullable', () => {
+  for (const [name, fields] of Object.entries(NULLABLE_WEBHOOK_FIELDS)) {
+    const body = declaredLines(name)
+    for (const field of fields) {
+      assert.match(body, new RegExp(`^ {4}${field}\\??: .*\\| null;$`, 'm'), `${name}.${field}`)
+    }
+  }
+})
+
+test('a payment event with surchargeAmount null keeps it null', () => {
+  const event = parseWebhookEvent(SAVED_CARD_EVENT)
+  assert.equal(event.data.surchargeAmount, null)
+  assert.equal(event.data.grossAmount, 8440)
 })

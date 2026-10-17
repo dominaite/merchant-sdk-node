@@ -931,12 +931,13 @@ export interface PaymentWebhookData {
   transactionId: string
   status: TransactionStatus | string
   previousStatus?: TransactionStatus | string | null
-  kind?: string
+  kind?: string | null
   /** What you are paid; on payment.refunded, what went back to the customer. */
   amount: number
   /** The card movement, surcharge included. */
-  grossAmount?: number
-  surchargeAmount?: number
+  grossAmount?: number | null
+  /** The surcharge the payer paid; null unless it is above 0. */
+  surchargeAmount?: number | null
   currency: string
   /** How the payer paid: 'card', 'wallet', ... Not the stored card; that is storedPaymentMethod. */
   paymentMethod?: string | null
