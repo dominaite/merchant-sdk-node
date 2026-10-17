@@ -876,6 +876,21 @@ export interface DominaiteClientOptions {
    * Trimmed; blank means none. A control character throws a TypeError at construction.
    */
   userAgent?: string
+  /**
+   * Receives the SDK's warnings: a Dominaite-Sdk-Notice from the API (once per distinct
+   * value), a retry in createCheckoutSessionWithRetry, and a ping clock skew above 60 s.
+   * Defaults to process.emitWarning (type DeprecationWarning for the notice, DominaiteWarning
+   * otherwise, code DOMINAITE_SDK). A hook that throws is ignored. A warning never carries
+   * the secret, a signature, a cashierToken or a body.
+   */
+  onWarning?: (message: string) => void
+  /**
+   * Turns on the debug log: one line per request with the method, the signed path, the
+   * status, the time in ms, the Dominaite-Request-Id and the idempotency key. Off when
+   * unset. A line never carries the secret, a signature, a cashierToken, a query string or
+   * a body.
+   */
+  onDebug?: (line: string) => void
   /** Injectable fetch, for tests or a proxy-aware implementation. Defaults to global fetch. */
   fetch?: typeof globalThis.fetch
 }
