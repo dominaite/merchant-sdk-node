@@ -180,7 +180,38 @@ test('the User-Agent names the package version', async () => {
 
   await makeClient(fetchImpl).ping()
 
-  assert.ok(calls[0].init.headers['User-Agent'].startsWith(`dominaite-node/${version} (node `))
+  const userAgent = calls[0].init.headers['User-Agent']
+  assert.equal(userAgent, `dominaite-node/${version} (node ${process.versions.node})`)
+  assert.match(userAgent, /^dominaite-node\/\d+\.\d+\.\d+ \(node [^ ()]+\)$/)
+})
+
+test('the userAgent option is appended after one space, trimmed', async () => {
+  const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  for (const [suffix, expected] of [
+    ['shop/1.2', ` shop/1.2`],
+    ['  shop/1.2  ', ` shop/1.2`],
+    ['   ', ''],
+  ]) {
+    const { fetchImpl, calls } = recordingFetch({ body: { success: true, data: { pong: true } } })
+    const client = new DominaiteClient({
+      keyId: KEY_ID,
+      secret: VECTOR.secret,
+      baseUrl: BASE_URL,
+      fetch: fetchImpl,
+      userAgent: suffix,
+    })
+    await client.ping()
+    assert.equal(calls[0].init.headers['User-Agent'], `dominaite-node/${version} (node ${process.versions.node})${expected}`)
+  }
+})
+
+test('a userAgent with a control character is refused at construction', () => {
+  for (const suffix of ['shop\r\nX-Evil: 1', 'shop\n', 'a\u0000b', 'a\u007fb']) {
+    assert.throws(
+      () => new DominaiteClient({ keyId: KEY_ID, secret: VECTOR.secret, baseUrl: BASE_URL, userAgent: suffix }),
+      (error) => error instanceof TypeError && /control characters/.test(error.message),
+    )
+  }
 })
 
 test('a ping against bad credentials is an AuthenticationError carrying the code', async () => {

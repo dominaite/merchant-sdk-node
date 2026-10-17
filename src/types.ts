@@ -870,6 +870,12 @@ export interface DominaiteClientOptions {
   baseUrl: string
   /** Per-request timeout in milliseconds. Defaults to 45000. */
   timeoutMs?: number
+  /**
+   * Your own identifier, appended to the SDK's User-Agent after one space, for example
+   * 'shop/1.2'. It helps when Dominaite support reads the access logs for your integration.
+   * Trimmed; blank means none. A control character throws a TypeError at construction.
+   */
+  userAgent?: string
   /** Injectable fetch, for tests or a proxy-aware implementation. Defaults to global fetch. */
   fetch?: typeof globalThis.fetch
 }

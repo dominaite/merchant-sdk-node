@@ -132,6 +132,7 @@ export class DominaiteClient {
   readonly #baseUrl: string
   readonly #timeoutMs: number
   readonly #fetch: typeof globalThis.fetch
+  readonly #userAgent: string
 
   constructor(options: DominaiteClientOptions) {
     if (!options?.keyId?.startsWith('dmk_')) {
@@ -145,6 +146,7 @@ export class DominaiteClient {
     this.#secret = options.secret
     this.#baseUrl = normalizeBaseUrl(options.baseUrl)
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    this.#userAgent = buildUserAgent(options.userAgent)
 
     const fetchImpl = options.fetch ?? globalThis.fetch
     if (typeof fetchImpl !== 'function') {
@@ -805,7 +807,7 @@ export class DominaiteClient {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       // Some edges block requests without a real User-Agent - always send one.
-      'User-Agent': `dominaite-node/${SDK_VERSION} (node ${process.version})`,
+      'User-Agent': this.#userAgent,
       'X-Api-Key-Id': this.#keyId,
       'X-Timestamp': timestamp,
       'X-Signature': signature,
@@ -1288,6 +1290,26 @@ function encodeBody(bodyParams: Record<string, unknown>): string {
  * gateway on; everywhere else the API key id, timestamp and signature would be readable
  * by anything on the path, and the reply would be forgeable.
  */
+/**
+ * `dominaite-node/<version> (node <version>)`, then the caller's suffix after one space. The
+ * operating system is left out on purpose. A suffix with a control character is refused: it
+ * would let a caller split the header.
+ */
+function buildUserAgent(suffix: string | undefined | null): string {
+  const base = `dominaite-node/${SDK_VERSION} (node ${process.versions.node})`
+  if (suffix === undefined || suffix === null) {
+    return base
+  }
+  if (typeof suffix !== 'string') {
+    throw new TypeError('userAgent must be a string')
+  }
+  if (/[\u0000-\u001f\u007f]/.test(suffix)) {
+    throw new TypeError('userAgent must not contain control characters')
+  }
+  const trimmed = suffix.trim()
+  return trimmed === '' ? base : `${base} ${trimmed}`
+}
+
 function normalizeBaseUrl(baseUrl: string | undefined | null): string {
   if (baseUrl === undefined || baseUrl === null) {
     throw new TypeError(BASE_URL_REQUIRED)
