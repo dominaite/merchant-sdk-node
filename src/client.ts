@@ -716,9 +716,11 @@ export class DominaiteClient {
    *
    * The answer carries the whsec_ secret ONCE. Store it at once: a repeat with the same
    * idempotencyKey answers the same endpoint with secret null, and no other route shows
-   * it. A create that got no answer, a timeout or a 5xx may still have registered the
-   * endpoint, so repeat it with the SAME key: that replaces the unanswered endpoint and
-   * answers a fresh id and secret.
+   * it. For that reason the client sends this call once and never retries it, whatever
+   * maxRetries says: a retry after an answer that was lost on the way would come back
+   * with secret null. A create that got no answer, a timeout or a 5xx may still have
+   * registered the endpoint, so repeat it with the SAME key: that replaces the unanswered
+   * endpoint and answers a fresh id and secret.
    *
    * Throws ApiError: WEBHOOK_URL_REJECTED (400) for a URL that is not HTTPS on a public
    * host; WEBHOOK_LIMIT_REACHED (409) at 25 active endpoints; WEBHOOK_ALREADY_REGISTERED
@@ -730,7 +732,8 @@ export class DominaiteClient {
    */
   async createWebhookEndpoint(params: CreateWebhookEndpointParams): Promise<CreatedWebhookEndpoint> {
     const { idempotencyKey, body } = prepareKeyedBody(params)
-    const reply = await this.#send('POST', WEBHOOKS_PATH, body, idempotencyKey)
+    // Never retried: a replay answers secret null, so a retry would lose the secret.
+    const reply = await this.#send('POST', WEBHOOKS_PATH, body, idempotencyKey, { maxRetries: 0 })
     const data = readObject(reply, 'webhook endpoint')
     return withMeta({ ...toWebhookEndpoint(data), secret: stringOrNull(data['secret']) }, reply)
   }

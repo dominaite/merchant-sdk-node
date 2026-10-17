@@ -255,3 +255,17 @@ test('the deprecated createCheckoutSessionWithRetry uses its own attempts, not o
   assert.equal(calls.length, 2)
   assert.deepEqual(warnings, ['dominaite-node: retrying createCheckoutSessionWithRetry after TransportError (attempt 2 of 2)'])
 })
+
+test('createWebhookEndpoint is sent once: a retry after a lost answer would come back with secret null', async () => {
+  const created = { status: 201, body: { success: true, data: { id: 'we_1', url: 'https://shop.example/hook', events: [], status: 'active', secret: 'whsec_1' } } }
+  const params = { url: 'https://shop.example/hook', events: ['payment.succeeded'], idempotencyKey: 'endpoint-main' }
+
+  for (const first of ['network', { status: 503, body: { success: false, error: { code: 'SERVICE_UNAVAILABLE' } } }]) {
+    const { fetchImpl, calls } = scripted([first, created])
+    const { client, sleeps } = makeClient(fetchImpl, { maxRetries: 5 })
+
+    await assert.rejects(client.createWebhookEndpoint(params), TransportError)
+    assert.equal(calls.length, 1)
+    assert.equal(sleeps.length, 0)
+  }
+})
