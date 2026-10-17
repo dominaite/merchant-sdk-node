@@ -19,3 +19,10 @@ updates:
       npm:
         patterns:
           - "*"
+    ignore:
+      # The SDK supports Node 20, so its types stay on Node 20.
+      - dependency-name: "@types/node"
+        versions: [">= 21"]
+      # TypeScript 7 needs a tsconfig change and is checked on its own.
+      - dependency-name: typescript
+        versions: [">= 7"]
