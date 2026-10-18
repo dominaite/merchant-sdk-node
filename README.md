@@ -1319,7 +1319,7 @@ body, and sends no `Idempotency-Key` header.
 
 The SDK is 0.x on purpose. A minor release (for example 0.6 to 0.7) can contain a breaking
 change. A patch release (0.6.0 to 0.6.1) does not. `CHANGELOG.md` lists every breaking change
-and what to do about it. Pin the minor version you tested with, for example `~0.6.0`.
+and what to do about it. Pin the minor version you tested with, for example `~0.7.0`.
 
 The SDK needs Node.js 20 or later. CI tests it on Node 20 and Node 24.
 
