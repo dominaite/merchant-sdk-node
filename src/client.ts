@@ -62,7 +62,7 @@ const AGREEMENTS_PATH = '/merchant-api/agreements'
 const WEBHOOKS_PATH = '/merchant-api/webhooks'
 const TRANSACTIONS_PATH = '/merchant-api/transactions'
 const DEFAULT_TIMEOUT_MS = 45_000 // serverless cold starts hit 10+s on dev; 15s was a coin flip
-const SDK_VERSION = '0.6.0'
+const SDK_VERSION = '0.7.0'
 /** The API takes an ISO 4217 code in uppercase and answers 400 INVALID_FORMAT to anything else. */
 const CURRENCY_PATTERN = /^[A-Z]{3}$/
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
